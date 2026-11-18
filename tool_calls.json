@@ -1,0 +1,11 @@
+{
+  "tool_calls": [
+    {
+      "id": "call_0",
+      "name": "read_gds",
+      "arguments": {
+        "cell_name": "ROM_MCELL0"
+      }
+    }
+  ]
+}

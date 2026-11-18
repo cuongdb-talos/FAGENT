@@ -1,0 +1,15 @@
+ROM_MCELL0 1000
+AA_D_10b_Min::<1>
+1 1 3 Nov  5 12:30:30 2026                      
+AA_D_10b_Min::<1> = DENSITY AA_D_10a_Min::Check_pattern AA_D_10a_Min::Check_region < 0.23 [(!AREA(AA_D_10a_Min::Check_pattern)+AREA(AA_D_10a_Min::Check_pattern)/AREA(AA_D_10a_Min::Check_region))]
+Global AA density for fully chip (including dummy AA)>= 0.23
+<= 0.75
+p 1 4
+DV 0.19191919
+DA 0.2574
+DA Check_pattern 0.0494
+DA Check_region 0.2574
+-110 -65
+330 -65
+330 520
+-110 520

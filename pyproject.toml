@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "FAGENT"
+version = "0.1.0"
+description = "Local GDS DRC LangGraph agent"
+requires-python = ">=3.10"
+
+[project.scripts]
+fagent = "FAGENT.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["FAGENT*"]

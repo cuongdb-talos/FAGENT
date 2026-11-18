@@ -1,0 +1,15 @@
+ROM_MCELL0 1000
+GT_D_7b_Min::<1>
+1 1 3 Nov  5 12:30:30 2026                      
+GT_D_7b_Min::<1> = DENSITY GT_D_7a_Min::Check_pattern AA_D_10a_Min::Check_region < 0.1 [(!AREA(GT_D_7a_Min::Check_pattern)+AREA(GT_D_7a_Min::Check_pattern)/AREA(AA_D_10a_Min::Check_region))]
+Global GT density for fully chip (including dummy)>= 0.1
+<= 0.45
+p 1 4
+DV 0.09324009
+DA 0.2574
+DA Check_pattern 0.024
+DA Check_region 0.2574
+-110 -65
+330 -65
+330 520
+-110 520

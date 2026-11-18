@@ -1,0 +1,5 @@
+list_cells : "list"
+drc_folder : "DRC"
+output_folder : "output"
+layer_map_files : ["config/layer_mapping"]
+drc_files : "DRC/1P7M_6Ic_1TKMc_ALPA2.drc"

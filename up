@@ -1,0 +1,1 @@
+scp -r /home/cuongdb3/AI/FAGENT/ 192.168.10.112:/data/projects/FIP/MEMORY/users/cuongdb3/AI/

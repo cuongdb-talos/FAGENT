@@ -1,0 +1,5 @@
+ROM_MCELL0 1000
+M4_D_6c::<1>
+0 0 2 Nov  5 12:30:30 2026                      
+M4_D_6c::<1> = DENSITY M4_D_6a_min::TMP<861> M1_D_6a_min::Check_region >= 0 WINDOW 200 BACKUP GRADIENT > 0.45 ABSOLUTE [AREA(M4_D_6a_min::TMP<861>)/AREA(M1_D_6a_min::Check_region)]
+The difference between Mn density in 200umX200um with step size 200um and those of the adjacent checking windows (including dummy). INDMY/MARKG/MARKF/MARKS covered areas are excluded for this rule checking<= 0.45

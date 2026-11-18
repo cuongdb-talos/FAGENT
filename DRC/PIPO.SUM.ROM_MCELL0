@@ -1,0 +1,71 @@
+********************************************************************************
+Product   : Virtuoso(R) XStream Out
+Program   : @(#)$CDS: strmout version 6.1.8-64b 10/01/2018 19:51 (ip-172-18-22-52) $
+          : sub-version  IC6.1.8-64b.83 
+Started at: 05-Nov-2026  12:30:26
+User Name : hainv78
+Host Name : node02.local
+Directory : /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib
+CADENCE Design Systems, Inc.
+********************************************************************************
+Info: Cellview Rev Num:99,  Tech Rev Num:59
+
+
+                       Individual Cell Statistics - Basic Objects
+---------------------------------------------------------------------------------------------------------------------------------------
+Library/Cell/View               Instance Array   Polygon  Rect   Path   PathSeg   Text   TextDisplay   Line   Dot   Arc   Donut   Ellipse 
+---------------------------------------------------------------------------------------------------------------------------------------
+ROM_LAYOUT/ROM_MCELL0/layout    0        0       0        11     0      0         3      0             0      0     0     0       0       
+---------------------------------------------------------------------------------------------------------------------------------------
+
+                       Individual Cell Statistics - Advanced Objects
+---------------------------------------------------------------------------------------------------------------------------------------
+Library/Cell/View               PRBdy    OtherBdy   AreaBlkg   LayerBlkg  AreaHalo   Row   Marker   CustVia   StdVia    CdsGenVia
+---------------------------------------------------------------------------------------------------------------------------------------
+ROM_LAYOUT/ROM_MCELL0/layout    0        0          0          0          0          0     0        0         0         0        
+---------------------------------------------------------------------------------------------------------------------------------------
+
+                       Statistics of Layers 
+---------------------------------------------------------------------------------------------------------------------------------------
+Cadence         Cadence         Stream  Stream   
+Layer           Purpose         Layer   Datatype  Polygon  Rect     Path     Text     TextDisplay   Line Dot Arc Donut Ellipse Pathseg
+---------------------------------------------------------------------------------------------------------------------------------------
+VSIA            drawing         63      63        0        0        0        1        0             0    0   0   0     0      0      
+CT              drawing         50      0         0        1        0        0        0             0    0   0   0     0      0      
+M1              drawing         61      0         0        1        0        0        0             0    0   0   0     0      0      
+BORDER          drawing         128     0         0        1        0        0        0             0    0   0   0     0      0      
+MnTXT           metal1          141     0         0        0        0        1        0             0    0   0   0     0      0      
+GT              drawing         30      0         0        2        0        0        0             0    0   0   0     0      0      
+AA              drawing         10      0         0        4        0        0        0             0    0   0   0     0      0      
+SN              drawing         40      0         0        1        0        0        0             0    0   0   0     0      0      
+MOSCKT          drawing         131     2         0        1        0        0        0             0    0   0   0     0      0      
+WELTXT          drawing         162     0         0        0        0        1        0             0    0   0   0     0      0      
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Summary of Objects Translated:
+	Scalar Instances:		0
+	Array Instances:		0
+	Polygons:			0
+	Paths:				0
+	Rectangles:			11
+	Lines:				0
+	Arcs:				0
+	Donuts:				0
+	Dots:				0
+	Ellipses:			0
+	Boundaries:			0
+	Area Blockages:			0
+	Layer Blockages:		0
+	Area Halos:			0
+	Markers:			0
+	Rows:				0
+	Standard Vias:			0
+	Custom Vias:			0
+	CdsGen Vias:			0
+	Pathsegs:			0
+	Text:				3
+	TextDisplay:		0
+	Cells:				1
+Design Libraries: 
+
+DEFINE ROM_LAYOUT	/data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/ROM_LAYOUT
