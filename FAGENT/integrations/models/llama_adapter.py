@@ -62,9 +62,9 @@ class LlamaAdapter:
             setattr(self, attr, model)
         return model
 
-    def chat(self, messages, tools):
+    def chat(self, messages, tools, response_schema):
         self.last_thinking = None
-        schema = self.response_schema(tools)
+        schema = self.response_schema(tools, response_schema)
         response = self.load_model('agent').create_chat_completion(
             messages=messages, response_format={'type': 'json_object', 'schema': schema})
         try:
@@ -106,7 +106,7 @@ class LlamaAdapter:
         self.message = message
         return self.message
 
-    def response_schema(self, tools):
+    def response_schema(self, tools, response_schema):
         alternatives = []
         for tool in tools:
             function = tool['function']
@@ -115,16 +115,7 @@ class LlamaAdapter:
             alternatives.append({'type': 'object', 'properties': {
                 'name': {'const': function['name']}, 'arguments': parameters},
                 'required': ['name', 'arguments'], 'additionalProperties': False})
-        alternatives.append({'type': 'object', 'properties': {
-            'decision': {'type': 'string', 'enum': ['completed', 'stop']},
-            'status': {'type': 'string', 'enum': ['verified', 'incomplete']},
-            'reason': {'type': 'string'},
-            'violations_analysis': {'type': 'array', 'items': {'type': 'object',
-                'properties': {'rule': {'type': 'string'}, 'action': {'type': 'string'}, 'details': {'type': 'string'}},
-                'required': ['rule', 'action', 'details'], 'additionalProperties': False}},
-            'recommendations': {'type': 'string'}},
-            'required': ['decision', 'status', 'reason', 'violations_analysis', 'recommendations'],
-            'additionalProperties': False})
+        alternatives.append(response_schema)
         return {'oneOf': alternatives}
 
     def normalize_text_calls(self, message):

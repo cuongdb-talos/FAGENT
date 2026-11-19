@@ -156,6 +156,8 @@ class CalibreSimulator:
             top_cells = self.library.top_level()
             cell = top_cells[0] if top_cells else self.library.cells[0]
 
+        if not cell.name or Path(cell.name).name != cell.name or cell.name in ('.', '..'):
+            raise ValueError(f'Invalid top-cell name for DRC reports: {cell.name!r}')
         self.top_cell = cell.name
         flat_cell = cell.copy(f"{cell.name}_flat")
         flat_cell.flatten()

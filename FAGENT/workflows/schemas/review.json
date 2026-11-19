@@ -1,0 +1,1 @@
+{"type":"object","properties":{"decision":{"enum":["stop","continue","unclear"]}},"required":["decision"],"additionalProperties":false}

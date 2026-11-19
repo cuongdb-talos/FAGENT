@@ -12,10 +12,9 @@ import math
 import re
 import sqlite3
 from pathlib import Path
-from ..agent.review import ReviewState
 from .storage import KnowledgeStore
 from .indexing import KnowledgeIndexer
-from ..models.llama_adapter import LlamaAdapter
+from ..integrations.models.llama_adapter import LlamaAdapter
 
 
 KNOWLEDGE_ROOT = Path(__file__).resolve().parent.parent / 'knowledge'
@@ -125,8 +124,10 @@ class HybridRetriever(KnowledgeStore, KnowledgeIndexer):
         review = record.get('review')
         if not isinstance(review, dict):
             return False
+        if review.get('consent_source') == 'human_review':
+            return review.get('storage_consent') is True and review.get('authorized') is True
         return (review.get('completed') is True and review.get('save_requested') is True
-                and ReviewState().run(review.get('feedback', '')).authorized)
+                and bool(review.get('feedback')))
 
     def embedding_identity(self, model):
         if self.config.get('embedding_model_path'):

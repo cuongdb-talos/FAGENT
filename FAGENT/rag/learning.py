@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 
 from .retriever import HybridRetriever
-from ..agent.review import ReviewState
 
 
 class CaseLearner:
@@ -28,8 +27,9 @@ class CaseLearner:
             self.verbose = verbose
         if self.rundir is None:
             raise ValueError('rundir must be provided')
-        self.review = ReviewState().run((review or {}).get('feedback', ''))
-        if not self.review.authorized:
+        self.review = dict(review or {})
+        if (self.review.get('storage_consent') is not True or self.review.get('authorized') is not True
+                or self.review.get('consent_source') != 'human_review'):
             self.learned = False
             return self
         self.result_data = self.read_json('result.json')
@@ -57,9 +57,9 @@ class CaseLearner:
             if isinstance(description, list):
                 description = ' '.join(description)
             analysis = analysis_by_rule.get(name, {})
-            record = {'id': f'case:{fingerprint}:{name}', 'rule': name, 'content': json.dumps({'description': description, 'analysis': analysis}, ensure_ascii=False), 'outcome': outcome, 'validation_source': validation_source, 'source': str(self.rundir), 'validation': validation, 'review': self.review.evidence}
+            record = {'id': f'case:{fingerprint}:{name}', 'rule': name, 'content': json.dumps({'description': description, 'analysis': analysis}, ensure_ascii=False), 'outcome': outcome, 'validation_source': validation_source, 'source': str(self.rundir), 'validation': validation, 'review': self.review}
             self.extracted_records.append(record)
-        self.extracted_records.append({'id': f'run:{fingerprint}', 'kind': 'run_context', 'rule': '', 'content': json.dumps({'rules': [r.get('name') for r in rules], 'conversation': [m for m in self.conversation_data if isinstance(m, dict) and m.get('role') in ('assistant', 'tool')]}, ensure_ascii=False), 'outcome': outcome, 'validation_source': validation_source, 'source': str(self.rundir), 'validation': validation, 'review': self.review.evidence})
+        self.extracted_records.append({'id': f'run:{fingerprint}', 'kind': 'run_context', 'rule': '', 'content': json.dumps({'rules': [r.get('name') for r in rules], 'conversation': [m for m in self.conversation_data if isinstance(m, dict) and m.get('role') in ('assistant', 'tool')]}, ensure_ascii=False), 'outcome': outcome, 'validation_source': validation_source, 'source': str(self.rundir), 'validation': validation, 'review': self.review})
         self.rag = HybridRetriever(self.knowledge_dir, self.config).run()
         self.stored_ids = self.rag.index_records(self.extracted_records)
         self.knowledge_dir = self.rag.knowledge_dir

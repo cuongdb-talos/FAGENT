@@ -111,7 +111,9 @@ class LayoutService:
 
     def check_output_path(self, output):
         output = Path(output)
-        sources = [self.gds_path]
+        if not output.resolve().is_relative_to(self.rundir):
+            raise ValueError(f'Output escapes rundir: {output}')
+        sources = [self.gds_path, *map(Path, self.drc_files), *map(Path, self.gds_data.get('layer_maps', []))]
         drc_source = self.drc_data.get('source')
         if isinstance(drc_source, str) and drc_source:
             sources.append(Path(drc_source))
@@ -127,35 +129,6 @@ class LayoutService:
         if getattr(self, 'verbose', True):
             print(f"    [Candidate] Candidate layout saved to {self.candidate}")
         return {'candidate': str(self.candidate), 'validated': False}
-
-    def run_calibre(self):
-        deck_path = next((Path(p) for p in self.drc_files if Path(p).is_file()), None)
-        if deck_path is not None:
-            from CALIBRE.calibre import CalibreSimulator
-            sim = CalibreSimulator(gds_path=self.candidate, drc_path=deck_path, outdir=self.rundir).run()
-            self.calibre_result = {
-                'status': 'good' if sim.total_violations == 0 else 'failed',
-                'simulated': True,
-                'total_violations': sim.total_violations,
-                'violations_by_rule': {rule: len(items) for rule, items in sim.violations.items()},
-            }
-            return self.calibre_result
-        self.calibre_result = {'status': 'good', 'simulated': True}
-        return self.calibre_result
-
-    def validate(self):
-        if getattr(self, 'verbose', True):
-            print(f"[Phase 4/5] Executing Candidate Validation...")
-        if not self.dirty:
-            return {
-                'status': 'not_validated',
-                'reason': 'No candidate modification. Call read_gds and replace_polygon to fix DRC violations before calling validate.',
-            }
-        self.save_gds()
-
-        self.run_calibre()
-        self.last_validation = self.calibre_result
-        return self.last_validation
 
     def get_cell(self, name):
         self.load_library()

@@ -1,0 +1,1 @@
+Classify the latest human feedback in the supplied review context. Use stop for a clear request to end or a confirmation that the user is done, continue for a clear request to keep working, and unclear for ambiguous feedback. Return only a decision object. Storage consent is handled independently.

@@ -12,4 +12,7 @@ requires-python = ">=3.10"
 fagent = "FAGENT.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["FAGENT*"]
+include = ["FAGENT*", "CALIBRE*"]
+
+[tool.setuptools.package-data]
+FAGENT = ["config*.json", "knowledge/prompts/*.md", "workflows/*.yaml", "workflows/schemas/*.json", "workflows/tools/*.json"]

@@ -1,0 +1,56 @@
+{
+  "type": "object",
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "stop"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "incomplete"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "violations_analysis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule",
+          "action",
+          "details"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "recommendations": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision",
+    "status",
+    "reason",
+    "violations_analysis",
+    "recommendations"
+  ],
+  "additionalProperties": false
+}

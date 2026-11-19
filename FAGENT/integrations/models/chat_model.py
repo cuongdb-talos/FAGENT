@@ -15,6 +15,6 @@ class LocalChatModel:
         self.client = client or LlamaAdapter(config)
         self.message = None
 
-    def chat(self, messages, tools):
-        self.message = self.client.chat(messages, tools)
+    def chat(self, messages, tools, response_schema):
+        self.message = self.client.chat(messages, tools, response_schema)
         return self.message

@@ -9,13 +9,13 @@ Trách nhiệm & Chức năng:
 import json
 from pathlib import Path
 from .gds_parser import ProcessGDS
-from .drc import DrcParser
+from ..drc.parser import DrcParser
 
 
 class InputLoader(DrcParser):
     GDS_OUTPUT = 'gds.json'
     DRC_OUTPUT = 'drc.json'
-    ARTIFACT_FILES = ('candidate.gds', 'conversation.json', 'result.json')
+    ARTIFACT_FILES = ('candidate.gds', 'conversation.json', 'result.json', 'graph-checkpoints.sqlite3')
     OUTPUT_FILES = (GDS_OUTPUT, DRC_OUTPUT) + ARTIFACT_FILES
 
     def run(self, gds_path=None, drc_path=None, output_dir=None, layer_map_files=None, verbose=None):
@@ -31,7 +31,14 @@ class InputLoader(DrcParser):
             raise ValueError('gds_path, drc_path, and output_dir must be provided')
 
      
+        for source in (self.gds_path, self.drc_path, *map(Path, self.layer_map_files or ())):
+            if not source.is_file():
+                raise ValueError(f'Input file does not exist: {source}')
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        for name in self.OUTPUT_FILES:
+            target = self.output_dir / name
+            if target.exists() or target.is_symlink():
+                raise ValueError(f'Output already exists: {target}')
 
         if self.verbose:
             print("[Phase 1/5] Ingesting Layout & Calibre DRC Results")
@@ -41,6 +48,7 @@ class InputLoader(DrcParser):
         self.gds_reader = ProcessGDS(str(self.gds_path), self.layer_map_files).run()
         self.gds_data = {
             'source': str(self.gds_path),
+            'layer_maps': [str(Path(path).resolve()) for path in self.layer_map_files or ()],
             'coordinates': 'gds_database_units',
             'database': self.gds_reader.gds_db,
         }
@@ -70,4 +78,6 @@ class InputLoader(DrcParser):
 
 
     def write_json(self, name, data):
-        (self.output_dir / name).write_text(json.dumps(data, indent=2) + '\n')
+        with (self.output_dir / name).open('x') as output:
+            json.dump(data, output, indent=2)
+            output.write('\n')

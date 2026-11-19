@@ -16,12 +16,16 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from .graph import build_graph
+from .state import candidate_digest
+
+
+PROMPT_FOR_FEEDBACK = object()
 
 
 class GraphRunner:
     def run(self, messages):
         self.prepare_graph()
-        state = self.graph.invoke({'messages': messages, 'iteration': 0}, self.graph_config)
+        state = self.graph.invoke({'messages': messages, 'iteration': 0, 'identity': self.workflow_identity()}, self.graph_config)
         return self.finish(state)
 
     def __init__(self, services, rundir, review_provider=None, checkpointer=None, thread_id=None):
@@ -47,25 +51,35 @@ class GraphRunner:
         self.graph_config = {'configurable': {'thread_id': self.thread_id},
                              'recursion_limit': max(25, self.services.max_iterations * 4 + 10)}
 
-    def resume(self, feedback):
+    def resume(self, feedback=PROMPT_FOR_FEEDBACK):
         self.prepare_graph()
         snapshot = self.graph.get_state(self.graph_config)
-        if snapshot.next != ('human_review',) or not any(task.interrupts for task in snapshot.tasks):
+        review_id = self.services.workflow.steps[-1].id
+        if snapshot.next != (review_id,) or not any(task.interrupts for task in snapshot.tasks):
             raise ValueError('No graph paused at review is available for this thread')
+        if snapshot.values.get('identity') != self.workflow_identity():
+            raise ValueError('Checkpoint workflow identity does not match the selected workflow')
         candidate = snapshot.values.get('candidate_path')
         if candidate:
+            self.services.check_output_path(Path(candidate))
+            digest = snapshot.values.get('candidate_digest')
+            if not digest or candidate_digest(Path(candidate)) != digest:
+                raise ValueError('Checkpoint candidate is missing or changed')
             self.services.restore_candidate(candidate, snapshot.values.get('validation'))
-        state = self.graph.invoke(Command(resume=feedback if feedback is not None else {'finished': True}), self.graph_config)
+        if feedback is PROMPT_FOR_FEEDBACK:
+            pending = next(item for task in snapshot.tasks for item in task.interrupts)
+            feedback = self.read_feedback(pending.value)
+        state = self.graph.invoke(Command(resume=feedback if feedback is not None else {'feedback': None}), self.graph_config)
         return self.finish(state)
 
     def finish(self, state):
         while state.get('__interrupt__'):
-            try:
-                feedback = self.review_provider()
-            except EOFError:
-                feedback = None
-            state = self.graph.invoke(Command(resume=feedback if feedback is not None else {'finished': True}), self.graph_config)
+            feedback = self.read_feedback(state['__interrupt__'][0].value)
+            state = self.graph.invoke(Command(resume=feedback if feedback is not None else {'feedback': None}), self.graph_config)
         self.result = dict(state.get('result') or {'status': 'incomplete', 'reason': 'No result'})
+        self.result['task'] = state.get('identity')
+        self.result['inputs'] = getattr(self.services, 'input_sources', state.get('inputs'))
+        self.result['candidate_digest'] = state.get('candidate_digest')
         self.result['validation'] = state.get('validation')
         self.result['review'] = state.get('review') or {'authorized': False}
         self.messages = state.get('messages', [])
@@ -78,5 +92,25 @@ class GraphRunner:
             self.services.store_knowledge(self.result['review'])
         return self.result
 
+    def read_feedback(self, context):
+        self.review_context = context
+        try:
+            return self.review_provider()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    def workflow_identity(self):
+        workflow = self.services.workflow
+        return {'task': workflow.task, 'version': workflow.version, 'digest': workflow.digest,
+                'config_digest': getattr(self.services, 'config_digest', None)}
+
     def prompt_review(self):
-        return input(f'Review task [thread {self.thread_id}] (EOF to finish): ')
+        print(json.dumps(self.review_context, ensure_ascii=False, indent=2))
+        feedback = input(f'Review task [thread {self.thread_id}] (EOF to finish): ')
+        consent = False
+        if feedback.strip() and self.services.workflow.task == 'drc':
+            try:
+                consent = input('Save this run to the knowledge store if the review ends? [y/N] ').strip().lower() in ('y', 'yes')
+            except (EOFError, KeyboardInterrupt):
+                pass
+        return {'feedback': feedback, 'storage_consent': consent}

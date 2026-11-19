@@ -24,3 +24,21 @@ class FagentState(TypedDict, total=False):
     review: dict[str, Any]
     save_requested: bool
     review_finished: bool
+    inputs: dict[str, Any]
+    response: dict[str, Any]
+    repair_error: str
+    inspected: list[str]
+    identity: dict[str, Any]
+    candidate_digest: str | None
+
+
+def candidate_digest(path):
+    from hashlib import sha256
+
+    digest = sha256()
+    if not path.is_file():
+        return None
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
