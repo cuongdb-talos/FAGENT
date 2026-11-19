@@ -1,4 +1,12 @@
-"""Command-line entry point for the normalized FAGENT LangGraph workflow."""
+"""Module FAGENT.__main__: Điểm nhập thực thi dòng lệnh (CLI Entry Point) cho hệ thống FAGENT.
+
+Trách nhiệm & Chức năng:
+- Xử lý các tham số dòng lệnh CLI (--gds, --drc, --output, --setup, --config, --resume-thread, --load-only).
+- Điều phối chế độ chạy hàng loạt theo cấu hình YAML (--setup) hoặc chạy đơn lẻ từng cell (run_cell).
+- Nạp dữ liệu GDS/DRC ban đầu thông qua InputLoader, xác thực an toàn không ghi đè dữ liệu cũ.
+- Khởi tạo Agent_caller, GraphServices và GraphRunner để thực thi quy trình sửa DRC tự động bằng LangGraph.
+- Hỗ trợ phục hồi phiên làm việc bị ngắt quãng từ SQLite checkpoint (--resume-thread).
+"""
 import argparse
 import json
 import sys
@@ -13,9 +21,17 @@ import yaml
 from .agent.caller import Agent_caller
 from .agent.runner import GraphRunner
 from .agent.services import GraphServices
-from .io.loaders import InputLoader
+from .tools.loaders import InputLoader
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.json'
+
+
+def normalize_goal(raw_prompts):
+    if isinstance(raw_prompts, str):
+        return raw_prompts.strip()
+    if isinstance(raw_prompts, list):
+        return '\n'.join(str(item).strip() for item in raw_prompts if str(item).strip())
+    return ''
 
 
 def main():
@@ -60,6 +76,9 @@ def main():
         if isinstance(decks, str):
             decks = [decks]
         config['drc_files'] = [str((base / path).resolve()) for path in decks]
+        goal = normalize_goal(setup.get('prompts') if 'prompts' in setup else setup.get('prompt'))
+        if goal:
+            config['goal'] = goal
         cells = [line.strip() for line in cell_list.read_text().splitlines()
                  if line.strip() and not line.lstrip().startswith('#')]
         for cell in cells:

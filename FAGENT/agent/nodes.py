@@ -1,4 +1,14 @@
-"""Graph nodes operating on serializable state and injected services."""
+"""Module FAGENT.agent.nodes: Định nghĩa các Node và Routing Logic trong LangGraph.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `GraphNodes` triển khai các hành vi tại từng bước của đồ thị:
+  + `model`: Gửi prompt tới LLM qua services.chat(), theo dõi số lượt lặp (iteration).
+  + `tools`: Thực thi các tool call (read_gds, replace_polygon, save_gds, validate, store_knowledge)
+    và cập nhật trạng thái candidate, vô hiệu hóa review cũ khi có sửa đổi hình học.
+  + `finish`: Tạo bản tóm tắt kết quả cuối cùng của quá trình sửa lỗi.
+  + `review`: Gọi interrupt() tạm dừng phiên làm việc để chờ phản hồi từ người dùng qua CLI.
+- Điều hướng luồng thực thi thông qua các hàm conditional edges: `route_model`, `route_tools`, `route_review`.
+"""
 import json
 from langgraph.types import interrupt
 from .review import ReviewState
@@ -33,6 +43,7 @@ class GraphNodes:
         save_requested = False
         candidate_path = state.get('candidate_path')
         result_state = state.get('result', {})
+        verbose = getattr(self.services, 'verbose', getattr(getattr(self.services, 'caller', None), 'verbose', True))
         for call in messages[-1].get('tool_calls', []):
             call_id = call.get('id')
             if not call_id:
@@ -43,6 +54,8 @@ class GraphNodes:
                 args = function.get('arguments', {})
                 if isinstance(args, str):
                     args = json.loads(args)
+                if verbose:
+                    print(f"  * Tool Call: {name}({json.dumps(args, ensure_ascii=False)})")
                 if name == 'store_knowledge':
                     evidence = ReviewState().run(review.get('feedback', ''))
                     if not review.get('authorized') or not evidence.authorized:

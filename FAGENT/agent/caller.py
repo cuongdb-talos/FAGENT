@@ -1,8 +1,15 @@
-"""Bounded tool-calling loop for local llama.cpp models."""
+"""Module FAGENT.agent.caller: Bộ điều khiển vòng lặp gọi công cụ (Tool-Calling Controller) cho LLM.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `Agent_caller` quản lý việc giao tiếp với mô hình llama.cpp qua LlamaAdapter.
+- Đóng gói schema các công cụ (function calling JSON schema) và đưa vào prompt hệ thống.
+- Phân tích cú pháp JSON phản hồi từ LLM, trích xuất chuỗi suy nghĩ CoT (last_thinking) và kích hoạt tool calls.
+- Quản lý các dịch vụ nền tảng: LayoutService (functions), HybridRetriever (rag), CaseLearner (learn).
+"""
 import json
 from pathlib import Path
 from ..models.llama_adapter import LlamaAdapter
-from ..domain.layout import LayoutService
+from ..tools.layout import LayoutService
 from ..rag.learning import CaseLearner
 from ..rag.retriever import HybridRetriever, KNOWLEDGE_ROOT
 from .prompts import build_system_prompt
@@ -239,7 +246,11 @@ class Agent_caller:
     def chat(self, msg=None, specs=None):
         if msg is None:
             msg = self.messages
-        specs = (self.functions.tool_specs() if specs is None else specs) + [{
+        if specs is None:
+            from langchain_core.utils.function_calling import convert_to_openai_tool
+            from ..tools.agent_tools import build_tools
+            specs = [convert_to_openai_tool(tool) for tool in build_tools(self.functions)]
+        specs = specs + [{
             'type': 'function', 'function': {
                 'name': 'store_knowledge',
                 'description': 'Store experience only after explicit user confirmation of completion and a request to save.',

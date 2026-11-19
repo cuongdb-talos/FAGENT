@@ -1,4 +1,11 @@
-"""Local llama.cpp inference and embedding models."""
+"""Module FAGENT.models.llama_adapter: Bộ điều hợp (Adapter) kết nối engine llama.cpp cục bộ.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `LlamaAdapter` nạp và tương tác với các mô hình GGUF cục bộ qua thư viện `llama_cpp`.
+- Quản lý chế độ Chat Completion: Áp dụng ràng buộc định dạng JSON schema nghiêm ngặt cho function calling.
+- Trích xuất chuỗi suy nghĩ CoT (reasoning_content / thinking) thành thuộc tính `last_thinking`.
+- Tính toán vector embedding cho văn bản theo lô (batch processing) và hỗ trợ cache embedding vector.
+"""
 import json
 import math
 import re
@@ -19,6 +26,7 @@ class LlamaAdapter:
         self.embedding_model = None
         self.embedding_revision = None
         self.message = None
+        self.last_thinking = None
         self.vectors = None
 
     def load_model(self, purpose):
@@ -55,6 +63,7 @@ class LlamaAdapter:
         return model
 
     def chat(self, messages, tools):
+        self.last_thinking = None
         schema = self.response_schema(tools)
         response = self.load_model('agent').create_chat_completion(
             messages=messages, response_format={'type': 'json_object', 'schema': schema})
@@ -64,6 +73,9 @@ class LlamaAdapter:
             message = response['choices'][0]['message']
             if not isinstance(message, dict) or message.get('role') != 'assistant':
                 raise ValueError('invalid assistant message')
+            thinking = message.get('reasoning_content') or message.get('thinking')
+            if isinstance(thinking, str) and thinking.strip():
+                self.last_thinking = thinking.strip()
             content = message.get('content')
             if not isinstance(content, str):
                 raise ValueError('response content must be JSON')

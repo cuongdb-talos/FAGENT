@@ -1,4 +1,11 @@
-"""Extract labeled repair cases and add them to local RAG knowledge."""
+"""Module FAGENT.rag.learning: Trích xuất và học hỏi kinh nghiệm từ các phiên sửa lỗi DRC thành công.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `CaseLearner` phân tích kết quả sau khi quy trình sửa DRC hoàn tất và được con người phê duyệt.
+- Trích xuất thông tin vi phạm, hành động thay đổi polygon và kết quả kiểm tra thành bản ghi tri thức chuẩn hóa:
+  Định danh dạng `case:<fingerprint>:<rule>` và bản ghi tổng hợp `run:<fingerprint>`.
+- Lưu trữ tri thức mới vào hệ thống RAG để tự động cải thiện chất lượng đề xuất sửa lỗi cho các lần chạy sau.
+"""
 import hashlib
 import json
 from pathlib import Path

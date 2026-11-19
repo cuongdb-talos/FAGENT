@@ -1,4 +1,11 @@
-"""Ingest reference documents and rule decks."""
+"""Module FAGENT.rag.indexing: Lập chỉ mục tài liệu tham chiếu và Rule Deck SVRF.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `KnowledgeIndexer` phân tích cú pháp và bóc tách dữ liệu tri thức:
+  + Bóc tách từng khối rule check `{...}` trong file Calibre SVRF rule deck (`drc_files`).
+  + Phân đoạn các tệp Markdown tài liệu tham khảo theo cấu trúc heading (`reference_dir`).
+- Quản lý bộ nhớ đệm vector embedding trong bảng `embeddings` của SQLite dựa trên hash nội dung, kích thước và mtime.
+"""
 import hashlib
 import json
 import re

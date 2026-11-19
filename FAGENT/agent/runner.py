@@ -1,4 +1,12 @@
-"""Drive review interrupts and persist graph artifacts for the CLI."""
+"""Module FAGENT.agent.runner: Trình điều phối thực thi đồ thị và quản lý Artifacts / Checkpoints.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `GraphRunner` quản lý toàn bộ vòng đời thực thi của LangGraph:
+  + Khởi tạo cơ sở dữ liệu SQLite checkpoint (`graph-checkpoints.sqlite3`) để lưu trạng thái từng bước.
+  + Xử lý các điểm ngắt `interrupt` tại node human_review và tiếp nhận input từ người dùng qua CLI.
+  + Hỗ trợ phục hồi thread làm việc cũ từ checkpoint thông qua resume-thread.
+  + Lưu trữ artifacts cuối cùng vào rundir: `conversation.json` (lịch sử hội thoại) và `result.json` (kết quả và lý do kết thúc).
+"""
 import json
 import sqlite3
 from pathlib import Path

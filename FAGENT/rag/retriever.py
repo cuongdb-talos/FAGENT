@@ -1,4 +1,12 @@
-"""Local, persistent retrieval of FAGENT repair knowledge."""
+"""Module FAGENT.rag.retriever: Bộ truy xuất tri thức kết hợp (Hybrid Knowledge Retriever).
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `HybridRetriever` kết hợp đa tầng phương thức tìm kiếm tri thức sửa lỗi DRC:
+  1. Khớp chính xác tên DRC rule (Exact rule match).
+  2. Tìm kiếm theo từ khóa lexical (Keyword/token frequency ranking).
+  3. Tìm kiếm ngữ nghĩa vector (Semantic cosine similarity ranking) qua mô hình embedding cục bộ.
+- Lọc bảo mật: Chỉ cho phép truy xuất các tài liệu tham khảo gốc hoặc các case sửa lỗi đã có bằng chứng Human Review hợp lệ.
+"""
 import json
 import math
 import re
@@ -7,6 +15,7 @@ from pathlib import Path
 from ..agent.review import ReviewState
 from .storage import KnowledgeStore
 from .indexing import KnowledgeIndexer
+from ..models.llama_adapter import LlamaAdapter
 
 
 KNOWLEDGE_ROOT = Path(__file__).resolve().parent.parent / 'knowledge'
@@ -55,7 +64,7 @@ class HybridRetriever(KnowledgeStore, KnowledgeIndexer):
         prefix = self.config.get(f'embedding_{purpose}_prefix', '')
         inputs = [prefix + text for text in texts]
         if self.embedding_client is None:
-            from ..models.llama_adapter import LlamaAdapter
+            
             self.embedding_client = LlamaAdapter(self.config)
         if hasattr(self.embedding_client, 'chat'):
             vectors = self.embedding_client.embed_batch(inputs)

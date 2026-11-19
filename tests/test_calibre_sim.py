@@ -2,7 +2,7 @@ from pathlib import Path
 import gdstk
 
 from CALIBRE.calibre import CalibreSimulator, main
-from FAGENT.domain.drc import DrcParser
+from FAGENT.tools.drc import DrcParser
 
 
 ROOT = Path(__file__).resolve().parent.parent

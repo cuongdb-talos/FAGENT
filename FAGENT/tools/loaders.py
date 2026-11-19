@@ -1,8 +1,15 @@
-"""Read GDS and Calibre ASCII results into JSON-serializable data."""
+"""Module FAGENT.tools.loaders: Bộ nạp và chuẩn hóa dữ liệu đầu vào (Input Loader).
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `InputLoader` kế thừa DrcParser, kết hợp ProcessGDS để chuyển đổi file GDS và kết quả Calibre DRC
+  thành hai tệp JSON chuẩn hóa trong rundir: `gds.json` và `drc.json`.
+- Đảm bảo an toàn dữ liệu: Kiểm tra đường dẫn, không ghi đè file input gốc và từ chối chạy nếu rundir đã chứa
+  artifacts từ các phiên chạy trước chưa được làm sạch.
+"""
 import json
 from pathlib import Path
-from ..domain.gds_parser import ProcessGDS
-from ..domain.drc import DrcParser
+from .gds_parser import ProcessGDS
+from .drc import DrcParser
 
 
 class InputLoader(DrcParser):

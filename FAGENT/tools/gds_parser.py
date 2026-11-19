@@ -1,6 +1,10 @@
-"""ProcessGDS adapted from TESTCASE/tools/read_data.py.
+"""Module FAGENT.tools.gds_parser: Bộ phân tích nhị phân GDSII (Low-level GDSII Parser).
 
-Coordinates in gds_db are integer GDS database units.
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `ProcessGDS` phân tích trực tiếp luồng byte nhị phân của định dạng GDSII (BGNLIB, BGNSTR, BOUNDARY, PATH, SREF, XY...).
+- Trích xuất cấu trúc hình học layout chi tiết: các cell, danh sách polygon, số lượng đỉnh và tọa độ integer database units (DBU).
+- Ánh xạ số hiệu layer/datatype sang tên lớp vật lý tương ứng thông qua tệp cấu hình layer map (`layer_mapping`).
+- Xuất dữ liệu cấu trúc phục vụ việc tạo tệp trung gian `gds.json`.
 """
 import json
 import copy

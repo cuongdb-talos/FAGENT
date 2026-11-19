@@ -1,4 +1,11 @@
-"""Parse Calibre DRC results and summary files."""
+"""Module FAGENT.tools.drc: Bộ phân tích tệp kết quả và báo cáo Calibre DRC.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `DrcParser` đọc và trích xuất dữ liệu từ các định dạng tệp Calibre DRC:
+  + ASCII Results file (`.drc.results`): Trích xuất tên rule vi phạm, số lượng lỗi, tọa độ marker (polygon/edge) và tỷ lệ DBU (`dbu_per_user_unit`).
+  + Summary file (`.drc.summary`): Phân tích thống kê tổng số lỗi DRC và trạng thái từng rule check.
+- Chuẩn hóa dữ liệu vi phạm thành định dạng JSON có cấu trúc phục vụ việc tạo `drc.json`.
+"""
 import re
 from pathlib import Path
 

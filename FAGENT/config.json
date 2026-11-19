@@ -1,6 +1,6 @@
 {
   "agent_model_path": "/mnt/d74b9a13-9fbd-4687-8385-e72dd5e811b1/AI_BUNDLE/models/main_agent/qwen2.5-coder:7b.gguf",
-  "agent_n_ctx": 32768,
+  "agent_n_ctx": 65536,
   "agent_n_threads": null,
   "agent_n_gpu_layers": 0,
   "agent_chat_format": null,
@@ -11,5 +11,6 @@
   "embedding_batch_size": 16,
   "max_iterations": 20,
   "rag_limit": 5,
-  "rag_context_chars": 8000
+  "rag_context_chars": 8000,
+  "system_prompt": "You are a CAD/EDA layout DRC repair agent. Inspect cells with read_gds, fix violations with replace_polygon in GDS user units, and validate after edits."
 }

@@ -1,5 +1,12 @@
-"""Calibre DRC simulator for running rule-deck checks against GDS layouts."""
+"""Module CALIBRE.calibre: Bộ giả lập Calibre DRC (Calibre DRC Simulator) cho kiểm thử và mô phỏng.
 
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `CalibreSimulator` mô phỏng quy trình chạy Calibre DRC độc lập không phụ thuộc license công cụ:
+  + Phân tích cú pháp rule deck Calibre SVRF (layer definitions, rule checks, spacing, width, enclosure).
+  + Đọc file layout GDS thông qua thư viện gdstk, kiểm tra các điều kiện hình học của polygon.
+  + Sinh ra tệp kết quả ASCII DRC Results (`.drc.results`) chứa marker vi phạm và tệp tóm tắt (`.drc.summary`).
+- Phục vụ môi trường CI/CD, kiểm thử tự động và giả lập xác thực trong luồng FAGENT DRC Auto-Repair.
+"""
 from __future__ import annotations
 
 import argparse
@@ -22,7 +29,7 @@ class CalibreSimulator:
         self.check_geometry()
         self.write_results(start_time)
         self.write_summary(start_time)
-        self.status = "clean" if self.total_violations == 0 else "violations"
+        self.status = "incomplete"
         return self
 
     def __init__(
@@ -35,7 +42,7 @@ class CalibreSimulator:
     ) -> None:
         self.gds_path = Path(gds_path).resolve()
         self.drc_path = Path(drc_path).resolve()
-        self.outdir = Path(outdir).resolve() if outdir else self.gds_path.parent
+        self.outdir = Path(outdir).resolve() if outdir else self.gds_path.parent / "calibre_sim"
         self.requested_top_cell = top_cell
         self.angle_tolerance_deg = float(angle_tolerance_deg)
 
@@ -54,6 +61,7 @@ class CalibreSimulator:
         self.results_path: Path | None = None
         self.summary_path: Path | None = None
         self.status = "not_run"
+        self.checked_rules: list[str] = []
 
     def parse_drc_deck(self) -> None:
         """Parse precision, layer mappings, and rule blocks from the DRC deck."""
@@ -182,7 +190,46 @@ class CalibreSimulator:
                 if layer_names & forbidden_rule[1]:
                     self.violations[forbidden_rule[0]].append(pts_dbu)
 
+        self.check_sample_rules()
         self.total_violations = sum(len(items) for items in self.violations.values())
+
+    def check_sample_rules(self) -> None:
+        """Evaluate a limited geometric approximation of selected deck rules."""
+        self.checked_rules = []
+        rules = {rule["name"]: rule for rule in self.rules}
+        layers = {name: [p for p in self._flat_polygons if (p.layer, p.datatype) in pairs]
+                  for name, pairs in self.layer_names.items()}
+        precision = 1 / self.dbu_per_user_unit
+        scale = self.precision or self.dbu_per_user_unit
+        excluded = layers.get("INST", []) + layers.get("EXCLUi", []) + layers.get("MARKS", [])
+        metal = gdstk.boolean(layers.get("M1i", []), layers.get("M1SLOT", []), "not", precision=precision)
+
+        for name, rule in rules.items():
+            body = " ".join(rule["body"])
+            area = re.search(r"AREA\s+(\w+)\s*<\s*([\d.]+)", body, re.I)
+            border = re.search(r"ENC\s+(\w+)\s+BORDER\s*<\s*([\d.]+)", body, re.I)
+            markers = None
+            if name == "GT_A_13" and area:
+                candidates = gdstk.boolean(layers.get(area.group(1), []), [], "or", precision=precision)
+                markers = [p for p in candidates if p.area() < float(area.group(2))]
+            elif name == "CT_R_11":
+                support = gdstk.boolean(layers.get("GT", []) + layers.get("AA", []), metal, "and", precision=precision)
+                markers = gdstk.boolean(layers.get("CT", []), support, "not", precision=precision)
+            elif name == "CT_EN_7a_7b":
+                threshold = re.search(r"ENC\s+CT\s+M1\s*<\s*([\d.]+)", body, re.I)
+                if threshold:
+                    expanded = gdstk.offset(layers.get("CT", []), float(threshold.group(1)), precision=precision)
+                    markers = gdstk.boolean(expanded, metal, "not", precision=precision)
+            elif name.startswith("BD_R_1_") and border and name in {"BD_R_1_AA", "BD_R_1_GT", "BD_R_1_CT", "BD_R_1_M1"}:
+                expanded = gdstk.offset(layers.get(border.group(1), []), float(border.group(2)), precision=precision)
+                markers = gdstk.boolean(expanded, layers.get("BORDER", []), "not", precision=precision)
+            if markers is None:
+                continue
+            self.checked_rules.append(name)
+            for polygon in markers:
+                remainder = gdstk.boolean([polygon], excluded, "not", precision=precision)
+                if remainder:
+                    self.violations[name].append([(round(x * scale), round(y * scale)) for x, y in polygon.points])
 
     def _find_rule(self, keywords: list[str]) -> str | None:
         for rule in self.rules:
@@ -253,6 +300,7 @@ class CalibreSimulator:
         lines = [
             "==================================================================================",
             "=== CALIBRE::DRC-H SUMMARY REPORT (SIMULATED)",
+            "=== INCOMPLETE: geometric approximations only; most SVRF rules are not evaluated",
             "===",
             f"Execution Date/Time:       {exec_dt}",
             "Calibre Version:           Simulated (Python/gdstk)",
@@ -339,6 +387,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[CalibreSim] Top cell: {sim.top_cell}")
     print(f"[CalibreSim] Rules checked: {len(sim.rules)}")
     print(f"[CalibreSim] Violations: {sim.total_violations}")
+    print("[CalibreSim] INCOMPLETE: approximate geometry checks; not a full SVRF run")
+    for name in sim.checked_rules:
+        print(f"[CalibreSim] {name}: {len(sim.violations[name])}")
     print(f"[CalibreSim] Results: {sim.results_path}")
     print(f"[CalibreSim] Summary: {sim.summary_path}")
     return 0

@@ -1,4 +1,12 @@
-"""Explicitly exposed layout and DRC operations."""
+"""Module FAGENT.tools.layout: Dịch vụ thao tác layout GDS cấp cao sử dụng thư viện gdstk.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `LayoutService` thực hiện các thao tác CAD trực tiếp trên layout:
+  + `read_gds()`: Đọc cấu trúc cell, lấy danh sách polygon, layer, datatype và bounding box theo GDS user units.
+  + `replace_polygon()`: Sửa đổi polygon bị lỗi DRC, kiểm tra tính hợp lệ hình học (tối thiểu 3 đỉnh, diện tích khác 0, tọa độ hữu hạn) và bảo toàn layer/datatype.
+  + `save_gds()`: Ghi layout candidate ra file `candidate.gds` trong rundir.
+  + `validate()` / `run_calibre()`: Thực hiện kiểm tra DRC trên candidate layout bằng Calibre Simulator hoặc Calibre DRC thật, trả về kết quả vi phạm cập nhật.
+"""
 import math
 import json
 from pathlib import Path
@@ -6,11 +14,13 @@ import gdstk
 
 
 class LayoutService:
-    def run(self, rundir=None, verbose=None):
+    def run(self, rundir=None, verbose=None, drc_files=None):
         if rundir is not None:
             self.rundir = Path(rundir).resolve()
         if verbose is not None:
             self.verbose = verbose
+        if drc_files is not None:
+            self.drc_files = list(drc_files)
         if self.rundir is None:
             raise ValueError('rundir must be provided')
         self.gds_data = json.loads((self.rundir / 'gds.json').read_text())
@@ -28,9 +38,10 @@ class LayoutService:
         self.drc_log = None
         return self
 
-    def __init__(self, rundir=None, verbose=True):
+    def __init__(self, rundir=None, verbose=True, drc_files=None):
         self.rundir = Path(rundir).resolve() if rundir else None
         self.verbose = verbose
+        self.drc_files = list(drc_files) if drc_files else []
         self.gds_data = None
         self.drc_data = None
         self.gds_path = None
@@ -43,71 +54,6 @@ class LayoutService:
     @staticmethod
     def allowed_tools():
         return {'read_gds', 'replace_polygon', 'save_gds', 'validate'}
-
-    @staticmethod
-    def tool_specs():
-        return [
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'read_gds',
-                    'description': 'Read direct polygons in a cell, in GDS user units.',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'cell_name': {'type': 'string'},
-                        },
-                        'required': ['cell_name'],
-                    },
-                },
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'replace_polygon',
-                    'description': 'Replace one direct polygon. Coordinates are in GDS user units.',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            'cell_name': {'type': 'string'},
-                            'polygon_index': {'type': 'integer'},
-                            'points': {
-                                'type': 'array',
-                                'items': {
-                                    'type': 'array',
-                                    'items': {'type': 'number'},
-                                },
-                            },
-                        },
-                        'required': ['cell_name', 'polygon_index', 'points'],
-                    },
-                },
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'save_gds',
-                    'description': 'Save the current candidate GDS.',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {},
-                        'required': [],
-                    },
-                },
-            },
-            {
-                'type': 'function',
-                'function': {
-                    'name': 'validate',
-                    'description': 'Validate the candidate using fresh Calibre results.',
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {},
-                        'required': [],
-                    },
-                },
-            },
-        ]
 
     def read_drc(self, path=None):
         return self.read_drc_log(path)
@@ -133,7 +79,14 @@ class LayoutService:
         cell.add(new)
         self.dirty = True
         self.last_validation = None
-        return {'status': 'modified', 'new_index': len(cell.polygons) - 1}
+        return {
+            'status': 'modified',
+            'cell': cell_name,
+            'old_index': polygon_index,
+            'new_index': len(cell.polygons) - 1,
+            'layer': old.layer,
+            'datatype': old.datatype,
+        }
 
     def _get_polygon(self, cell, polygon_index):
         if isinstance(polygon_index, bool) or not isinstance(polygon_index, int) or not 0 <= polygon_index < len(cell.polygons):
@@ -176,6 +129,17 @@ class LayoutService:
         return {'candidate': str(self.candidate), 'validated': False}
 
     def run_calibre(self):
+        deck_path = next((Path(p) for p in self.drc_files if Path(p).is_file()), None)
+        if deck_path is not None:
+            from CALIBRE.calibre import CalibreSimulator
+            sim = CalibreSimulator(gds_path=self.candidate, drc_path=deck_path, outdir=self.rundir).run()
+            self.calibre_result = {
+                'status': 'good' if sim.total_violations == 0 else 'failed',
+                'simulated': True,
+                'total_violations': sim.total_violations,
+                'violations_by_rule': {rule: len(items) for rule, items in sim.violations.items()},
+            }
+            return self.calibre_result
         self.calibre_result = {'status': 'good', 'simulated': True}
         return self.calibre_result
 
@@ -183,7 +147,10 @@ class LayoutService:
         if getattr(self, 'verbose', True):
             print(f"[Phase 4/5] Executing Candidate Validation...")
         if not self.dirty:
-            return {'status': 'not_validated', 'reason': 'No candidate modification'}
+            return {
+                'status': 'not_validated',
+                'reason': 'No candidate modification. Call read_gds and replace_polygon to fix DRC violations before calling validate.',
+            }
         self.save_gds()
 
         self.run_calibre()

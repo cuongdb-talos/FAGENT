@@ -1,4 +1,9 @@
-"""Local chat boundary retaining the existing JSON-call adapter."""
+"""Module FAGENT.models.chat_model: Giao diện Chat Model cục bộ cho FAGENT.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `LocalChatModel` đóng gói giao diện gửi/nhận tin nhắn và gọi công cụ (tool calling)
+  dựa trên LlamaAdapter, tạo lớp trừu tượng hóa cho việc tương tác LLM.
+"""
 from .llama_adapter import LlamaAdapter
 
 

@@ -1,4 +1,10 @@
-"""Persistent knowledge records and atomic JSON snapshots."""
+"""Module FAGENT.rag.storage: Quản lý lưu trữ tri thức và snapshot JSON nguyên tử.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `KnowledgeStore` quản lý cơ sở dữ liệu SQLite `rag.sqlite3` lưu trữ các bản ghi tri thức sửa lỗi.
+- Đảm bảo tính nhất quán dữ liệu: Xuất snapshot ra tệp `records.json` bằng kỹ thuật ghi tệp tạm nguyên tử (atomic write).
+- Cung cấp API truy vấn, lập chỉ mục và kiểm tra tính hợp lệ của các bản ghi tri thức.
+"""
 import hashlib
 import json
 import os

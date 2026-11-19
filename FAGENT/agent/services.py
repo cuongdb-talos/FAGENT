@@ -1,4 +1,15 @@
-"""Runtime dependencies injected into the graph."""
+"""Module FAGENT.agent.services: Dependency Injection Container cho đồ thị LangGraph.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `GraphServices` khởi tạo và tiêm phụ thuộc (dependencies) vào các node của graph.
+- Quản lý các thành phần cốt lõi:
+  + LayoutService: Thao tác hình học GDS trực tiếp qua gdstk.
+  + LlamaAdapter: Mô hình suy luận và tính toán vector embedding cục bộ.
+  + HybridRetriever: Cơ chế tìm kiếm và truy xuất tri thức sửa lỗi DRC.
+  + CaseLearner: Học và lưu trữ các ca sửa lỗi thành công.
+- Đóng gói danh sách công cụ hoàn chỉnh (`tools`) thông qua `build_tools()`.
+- Quản lý các cấu hình giới hạn thực thi (`max_iterations`, `rag_context_chars`).
+"""
 import json
 from pathlib import Path
 import gdstk
@@ -6,16 +17,15 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from ..models.llama_adapter import LlamaAdapter
 from ..rag.learning import CaseLearner
 from ..rag.retriever import HybridRetriever
-from ..domain.layout import LayoutService
-from ..tools.layout_tools import build_layout_tools
-from ..tools.validation_tools import build_validation_tools
+from ..tools.layout import LayoutService
+from ..tools.agent_tools import build_tools
 from .prompts import build_system_prompt
 
 
 class GraphServices:
     def run(self):
         self.max_iterations = self.caller.config['max_iterations']
-        self.tools = build_layout_tools(self.caller.functions) + build_validation_tools(self.caller.functions)
+        self.tools = build_tools(self.caller.functions)
         return self
 
     def __init__(self, caller):
@@ -26,7 +36,11 @@ class GraphServices:
 
     def prepare(self):
         caller = self.caller
-        caller.functions = LayoutService(rundir=caller.rundir, verbose=caller.verbose).run()
+        caller.functions = LayoutService(
+            rundir=caller.rundir,
+            verbose=caller.verbose,
+            drc_files=caller.config.get('drc_files', []),
+        ).run()
         caller.gds_data = json.loads((caller.rundir / 'gds.json').read_text())
         caller.drc_data = json.loads((caller.rundir / 'drc.json').read_text())
         caller.client = LlamaAdapter(caller.config)
@@ -42,13 +56,20 @@ class GraphServices:
         names = [rule.get('name', '') for rule in rules if rule.get('name')]
         query = ' '.join(names + [str(rule.get('description', '')) for rule in rules])
         retrieved = caller.rag.retrieve(query, names, caller.config['rag_limit']) if query else []
+        user_payload = {'gds': caller.gds_data, 'drc': caller.drc_context}
+        if caller.config.get('goal'):
+            user_payload = {'goal': caller.config['goal'], **user_payload}
         self.messages = [{'role': 'system', 'content': build_system_prompt(caller.config, retrieved)},
-                         {'role': 'user', 'content': json.dumps({'gds': caller.gds_data, 'drc': caller.drc_context})}]
+                         {'role': 'user', 'content': json.dumps(user_payload)}]
         return self.messages
 
     def chat(self, messages):
         specs = [convert_to_openai_tool(tool) for tool in self.tools]
-        return self.caller.chat(messages, specs=specs)
+        message = self.caller.chat(messages, specs=specs)
+        thinking = getattr(self.caller.client, 'last_thinking', None) or message.get('reasoning_content') or message.get('thinking')
+        if self.caller.verbose and thinking:
+            print(f"[Thinking]\n{thinking}")
+        return message
 
     def checkpoint_candidate(self):
         return self.caller.functions.save_gds()['candidate']

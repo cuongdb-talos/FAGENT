@@ -1,4 +1,10 @@
-"""LangChain embeddings interface backed by local llama.cpp."""
+"""Module FAGENT.models.embeddings: Giao diện Embeddings tương thích chuẩn LangChain.
+
+Trách nhiệm & Chức năng:
+- Cung cấp lớp `LocalEmbeddings` kế thừa `langchain_core.embeddings.Embeddings`.
+- Triển khai hai phương thức cốt lõi: `embed_documents()` (nhúng danh sách tài liệu) và `embed_query()` (nhúng câu truy vấn)
+  sử dụng mô hình embedding chạy cục bộ trên llama.cpp.
+"""
 from langchain_core.embeddings import Embeddings
 from .llama_adapter import LlamaAdapter
 

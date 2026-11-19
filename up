@@ -1,1 +1,3 @@
-scp -r /home/cuongdb3/AI/FAGENT/ 192.168.10.112:/data/projects/FIP/MEMORY/users/cuongdb3/AI/
+
+rm -r FAGENT/knowledge/rag.sqlite3
+scp -r /home/cuongdb3/AI/FAGENT/FAGENT/ 192.168.10.112:/data/projects/FIP/MEMORY/users/cuongdb3/AI/FAGENT/

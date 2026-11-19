@@ -12,5 +12,5 @@
   "max_iterations": 20,
   "rag_limit": 5,
   "rag_context_chars": 8000,
-  "system_prompt": ""
+  "system_prompt": "You are a CAD/EDA layout DRC repair agent. Inspect cells with read_gds, fix violations with replace_polygon in GDS user units, and validate after edits."
 }
