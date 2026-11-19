@@ -1,4 +1,4 @@
-"""Module FAGENT.models.llama_adapter: Bộ điều hợp (Adapter) kết nối engine llama.cpp cục bộ.
+"""Module FAGENT.integrations.models.llama_adapter: Bộ điều hợp (Adapter) kết nối engine llama.cpp cục bộ.
 
 Trách nhiệm & Chức năng:
 - Cung cấp lớp `LlamaAdapter` nạp và tương tác với các mô hình GGUF cục bộ qua thư viện `llama_cpp`.

@@ -1,4 +1,4 @@
-"""Module FAGENT.tools.loaders: Bộ nạp và chuẩn hóa dữ liệu đầu vào (Input Loader).
+"""Module FAGENT.capabilities.layout.loaders: Bộ nạp và chuẩn hóa dữ liệu đầu vào (Input Loader).
 
 Trách nhiệm & Chức năng:
 - Cung cấp lớp `InputLoader` kế thừa DrcParser, kết hợp ProcessGDS để chuyển đổi file GDS và kết quả Calibre DRC

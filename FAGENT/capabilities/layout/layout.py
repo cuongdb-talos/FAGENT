@@ -1,4 +1,4 @@
-"""Module FAGENT.tools.layout: Dịch vụ thao tác layout GDS cấp cao sử dụng thư viện gdstk.
+"""Module FAGENT.capabilities.layout.layout: Dịch vụ thao tác layout GDS cấp cao sử dụng thư viện gdstk.
 
 Trách nhiệm & Chức năng:
 - Cung cấp lớp `LayoutService` thực hiện các thao tác CAD trực tiếp trên layout:

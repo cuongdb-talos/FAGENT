@@ -1,4 +1,4 @@
-"""Module FAGENT.tools.drc: Bộ phân tích tệp kết quả và báo cáo Calibre DRC.
+"""Module FAGENT.capabilities.drc.parser: Bộ phân tích tệp kết quả và báo cáo Calibre DRC.
 
 Trách nhiệm & Chức năng:
 - Cung cấp lớp `DrcParser` đọc và trích xuất dữ liệu từ các định dạng tệp Calibre DRC:

@@ -138,9 +138,9 @@ def run_cell(gds, drc, output, args, config, layer_map_files):
             raise ValueError('Resume layer maps do not match the checkpoint inputs')
     if args.load_only:
         result = {'status': 'loaded', 'violations': loader.drc_data['total_violations']}
+        print(json.dumps(result, ensure_ascii=False))
     else:
-        result = run_graph(rundir, args, config)
-    print(json.dumps(result, ensure_ascii=False))
+        run_graph(rundir, args, config)
 
 
 def run_graph(rundir, args, config):

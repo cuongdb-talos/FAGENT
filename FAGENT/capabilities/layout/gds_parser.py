@@ -1,4 +1,4 @@
-"""Module FAGENT.tools.gds_parser: Bộ phân tích nhị phân GDSII (Low-level GDSII Parser).
+"""Module FAGENT.capabilities.layout.gds_parser: Bộ phân tích nhị phân GDSII (Low-level GDSII Parser).
 
 Trách nhiệm & Chức năng:
 - Cung cấp lớp `ProcessGDS` phân tích trực tiếp luồng byte nhị phân của định dạng GDSII (BGNLIB, BGNSTR, BOUNDARY, PATH, SREF, XY...).
