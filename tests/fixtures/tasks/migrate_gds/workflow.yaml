@@ -1,0 +1,10 @@
+task: migrate_gds
+version: 1
+inputs: [input_gds, output_gds]
+prompts: [prompts/agent.md]
+schema: schemas/response.json
+steps:
+  - {id: read, action: 'steps:read_gds', next: migrate}
+  - {id: migrate, action: agent, tools: ['tools:inspect_layer'], next: validate}
+  - {id: validate, action: 'steps:validate_gds', next: review}
+  - {id: review, action: review, next: END, continue: migrate}

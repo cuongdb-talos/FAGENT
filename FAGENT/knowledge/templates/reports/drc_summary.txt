@@ -1,0 +1,33 @@
+==================================================================================
+=== CALIBRE::DRC-H SUMMARY REPORT (SIMULATED)
+=== INCOMPLETE: geometric approximations only; most SVRF rules are not evaluated
+===
+Execution Date/Time:       {exec_dt}
+Calibre Version:           Simulated (Python/gdstk)
+Rule File Pathname:        {drc_path}
+Layout System:             GDS
+Layout Path(s):            {gds_path}
+Layout Primary Cell:       {top_cell}
+DRC Results Database:      {results_name} (ASCII)
+Summary Report File:       {summary_name} (REPLACE)
+----------------------------------------------------------------------------------
+--- ORIGINAL LAYER STATISTICS
+---
+{layer_stats}
+----------------------------------------------------------------------------------
+--- RULECHECK RESULTS STATISTICS
+---
+{rulecheck_stats}
+----------------------------------------------------------------------------------
+--- RULECHECK RESULTS STATISTICS (BY CELL)
+---
+{cell_stats}
+----------------------------------------------------------------------------------
+--- SUMMARY
+---
+TOTAL CPU Time:                  {elapsed}
+TOTAL REAL Time:                 {elapsed}
+TOTAL Original Layer Geometries: {total_orig_geom} ({total_orig_geom})
+TOTAL DRC RuleChecks Executed:   {total_rules}
+TOTAL DRC Results Generated:     {total_violations} ({total_violations})
+TOTAL DFM RDB Results Generated: 0 (0)

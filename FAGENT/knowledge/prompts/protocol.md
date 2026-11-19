@@ -1,1 +1,0 @@
-Return exactly one JSON object without Markdown. To request a function, use {"name": <function name>, "arguments": <object>}. Otherwise return the final analysis matching the response schema. Available functions follow.

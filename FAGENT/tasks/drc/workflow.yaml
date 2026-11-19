@@ -1,0 +1,33 @@
+task: drc
+version: 1
+prompts:
+- prompts/drc.md
+protocol: knowledge/templates/prompts/protocol.md
+schema: schemas/drc.json
+review_prompt: knowledge/templates/prompts/review.md
+review_schema: knowledge/templates/schemas/review.json
+inputs:
+- gds
+- drc
+- layer_map
+backend: local
+steps:
+- id: read
+  action: steps:read_drc
+  next: repair
+- id: repair
+  action: agent
+  next: validate
+  tools:
+  - tools:read_gds
+  - tools:replace_polygon
+- id: validate
+  action: steps:validate_drc
+  next: human_review
+- id: human_review
+  action: review
+  next: END
+  continue: repair
+prepare: steps:prepare
+layout_services: true
+knowledge_review: true

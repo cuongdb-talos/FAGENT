@@ -1,24 +1,34 @@
-"""Module FAGENT.integrations.models.llama_adapter: Bộ điều hợp (Adapter) kết nối engine llama.cpp cục bộ.
+"""Local llama.cpp integration for schema-constrained chat completion and embeddings."""
 
-Trách nhiệm & Chức năng:
-- Cung cấp lớp `LlamaAdapter` nạp và tương tác với các mô hình GGUF cục bộ qua thư viện `llama_cpp`.
-- Quản lý chế độ Chat Completion: Áp dụng ràng buộc định dạng JSON schema nghiêm ngặt cho function calling.
-- Trích xuất chuỗi suy nghĩ CoT (reasoning_content / thinking) thành thuộc tính `last_thinking`.
-- Tính toán vector embedding cho văn bản theo lô (batch processing) và hỗ trợ cache embedding vector.
-"""
+# ==============================================================================
+# SECTION 1: Standard and Third-Party Library Imports
+# ==============================================================================
+from copy import deepcopy
 import json
 import math
+from pathlib import Path
 import re
 import uuid
-from copy import deepcopy
-from pathlib import Path
+
 import jsonschema
 
 
+# ==============================================================================
+# SECTION 2: Llama Model Integration Adapter Class
+# ==============================================================================
 class LlamaAdapter:
-    def run(self):
+    """Provides local inference with GGUF models via llama.cpp for tool-calling chat and embeddings."""
+
+    # --------------------------------------------------------------------------
+    # Main Setup and Execution Entry Point
+    # --------------------------------------------------------------------------
+    def run(self, purpose='agent'):
+        self.load_model(purpose)
         return self
 
+    # --------------------------------------------------------------------------
+    # Initialization
+    # --------------------------------------------------------------------------
     def __init__(self, config, model_factory=None):
         self.config = config
         self.model_factory = model_factory
@@ -29,6 +39,9 @@ class LlamaAdapter:
         self.last_thinking = None
         self.vectors = None
 
+    # --------------------------------------------------------------------------
+    # Model Lifecycle & Lazy Loading
+    # --------------------------------------------------------------------------
     def load_model(self, purpose):
         attr = 'agent_model' if purpose == 'agent' else 'embedding_model'
         model = getattr(self, attr)
@@ -62,6 +75,9 @@ class LlamaAdapter:
             setattr(self, attr, model)
         return model
 
+    # --------------------------------------------------------------------------
+    # Chat Completion & Response Validation
+    # --------------------------------------------------------------------------
     def chat(self, messages, tools, response_schema):
         self.last_thinking = None
         schema = self.response_schema(tools, response_schema)
@@ -106,6 +122,9 @@ class LlamaAdapter:
         self.message = message
         return self.message
 
+    # --------------------------------------------------------------------------
+    # JSON Schema Composition for Structured Outputs
+    # --------------------------------------------------------------------------
     def response_schema(self, tools, response_schema):
         alternatives = []
         for tool in tools:
@@ -118,6 +137,9 @@ class LlamaAdapter:
         alternatives.append(response_schema)
         return {'oneOf': alternatives}
 
+    # --------------------------------------------------------------------------
+    # Text-Based Tool Call Parsing Fallback
+    # --------------------------------------------------------------------------
     def normalize_text_calls(self, message):
         content = message.get('content')
         if message.get('tool_calls') or not isinstance(content, str):
@@ -138,6 +160,9 @@ class LlamaAdapter:
                 'name': data['name'], 'arguments': json.dumps(data['arguments'], ensure_ascii=False)}})
         return {**message, 'content': remainder or None, 'tool_calls': calls}
 
+    # --------------------------------------------------------------------------
+    # Dense Vector Embedding Generation
+    # --------------------------------------------------------------------------
     def embed_batch(self, texts):
         response = self.load_model('embedding').create_embedding(input=texts)
         try:

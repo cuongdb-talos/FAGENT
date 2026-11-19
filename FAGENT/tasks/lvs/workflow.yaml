@@ -1,0 +1,26 @@
+task: lvs
+version: 1
+prompts:
+- prompts/lvs.md
+protocol: knowledge/templates/prompts/protocol.md
+schema: schemas/lvs.json
+review_prompt: knowledge/templates/prompts/review.md
+review_schema: knowledge/templates/schemas/review.json
+inputs: []
+backend: local
+mock_pass: true
+steps:
+- id: read
+  action: steps:read_lvs
+  next: repair
+- id: repair
+  action: steps:repair_lvs
+  next: validate
+- id: validate
+  action: steps:validate_lvs
+  next: human_review
+- id: human_review
+  action: review
+  next: END
+  continue: repair
+prepare: steps:prepare

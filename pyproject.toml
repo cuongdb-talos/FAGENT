@@ -9,10 +9,10 @@ description = "Local GDS DRC LangGraph agent"
 requires-python = ">=3.10"
 
 [project.scripts]
-fagent = "FAGENT.__main__:main"
+fagent = "FAGENT.fagent:Fagent.main"
 
 [tool.setuptools.packages.find]
 include = ["FAGENT*", "CALIBRE*"]
 
 [tool.setuptools.package-data]
-FAGENT = ["config*.json", "knowledge/prompts/*.md", "workflows/*.yaml", "workflows/schemas/*.json", "workflows/tools/*.json"]
+FAGENT = ["config.example.json", "knowledge/templates/prompts/*.md", "knowledge/templates/schemas/*.json", "knowledge/templates/reports/*", "tasks/*/workflow.yaml", "tasks/*/prompts/*.md", "tasks/*/schemas/*.json"]
