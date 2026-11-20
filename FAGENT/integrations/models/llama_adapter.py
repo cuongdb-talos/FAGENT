@@ -14,7 +14,90 @@ import jsonschema
 
 
 # ==============================================================================
-# SECTION 2: Llama Model Integration Adapter Class
+# SECTION 2: Shared Structured Chat Schema and Response Normalization
+# ==============================================================================
+class StructuredChatContract:
+    """Composes JSON schemas and normalizes structured chat completion responses."""
+
+    # --------------------------------------------------------------------------
+    # Main Setup and Execution Entry Point
+    # --------------------------------------------------------------------------
+    def run(self, response, tools, response_schema):
+        schema = self.build_schema(tools, response_schema)
+        return self.normalize_response(response, schema)
+
+    # --------------------------------------------------------------------------
+    # Initialization
+    # --------------------------------------------------------------------------
+    def __init__(self, provider_label='llama.cpp'):
+        self.provider_label = provider_label
+        self.schema = None
+        self.last_thinking = None
+        self.message = None
+
+    # --------------------------------------------------------------------------
+    # JSON Schema Composition
+    # --------------------------------------------------------------------------
+    def build_schema(self, tools, response_schema):
+        alternatives = []
+        for tool in tools:
+            function = tool['function']
+            parameters = deepcopy(function['parameters'])
+            parameters['additionalProperties'] = False
+            alternatives.append({'type': 'object', 'properties': {
+                'name': {'const': function['name']}, 'arguments': parameters},
+                'required': ['name', 'arguments'], 'additionalProperties': False})
+        alternatives.append(response_schema)
+        self.schema = {'oneOf': alternatives}
+        return self.schema
+
+    # --------------------------------------------------------------------------
+    # Response Validation and Message Normalization
+    # --------------------------------------------------------------------------
+    def normalize_response(self, response, schema):
+        self.last_thinking = None
+        try:
+            if response['choices'][0].get('finish_reason') == 'length':
+                raise ValueError('response truncated')
+            message = response['choices'][0]['message']
+            if not isinstance(message, dict) or message.get('role') != 'assistant':
+                raise ValueError('invalid assistant message')
+            thinking = message.get('reasoning_content') or message.get('thinking')
+            if isinstance(thinking, str) and thinking.strip():
+                self.last_thinking = thinking.strip()
+            content = message.get('content')
+            if not isinstance(content, str):
+                raise ValueError('response content must be JSON')
+            content = content.strip()
+            match = re.fullmatch(r'```(?:json)?\s*([\s\S]*?)\s*```', content, flags=re.IGNORECASE)
+            if match:
+                content = match.group(1)
+            data = json.loads(content)
+            jsonschema.validate(data, schema)
+            if 'name' in data:
+                message = {'role': 'assistant', 'content': None, 'tool_calls': [{
+                    'id': 'call_' + uuid.uuid4().hex, 'type': 'function',
+                    'function': {'name': data['name'], 'arguments': json.dumps(data['arguments'], ensure_ascii=False)}}]}
+            else:
+                message = {'role': 'assistant', 'content': json.dumps(data, ensure_ascii=False)}
+            calls = message.get('tool_calls') or []
+            if not isinstance(calls, list):
+                raise ValueError('invalid tool calls')
+            for call in calls:
+                function = call['function']
+                if not isinstance(call.get('id'), str) or not call['id'] or not isinstance(function.get('name'), str) or not function['name']:
+                    raise ValueError('tool call missing id or name')
+                arguments = function['arguments']
+                if not isinstance(arguments, str) or not isinstance(json.loads(arguments), dict):
+                    raise ValueError('invalid tool arguments')
+        except (KeyError, IndexError, TypeError, ValueError, jsonschema.ValidationError) as exc:
+            raise ValueError(f'Invalid {self.provider_label} chat response: {exc}') from exc
+        self.message = message
+        return self.message
+
+
+# ==============================================================================
+# SECTION 3: Llama Model Integration Adapter Class
 # ==============================================================================
 class LlamaAdapter:
     """Provides local inference with GGUF models via llama.cpp for tool-calling chat and embeddings."""
@@ -38,6 +121,7 @@ class LlamaAdapter:
         self.message = None
         self.last_thinking = None
         self.vectors = None
+        self.contract = StructuredChatContract('llama.cpp')
 
     # --------------------------------------------------------------------------
     # Model Lifecycle & Lazy Loading
@@ -83,59 +167,15 @@ class LlamaAdapter:
         schema = self.response_schema(tools, response_schema)
         response = self.load_model('agent').create_chat_completion(
             messages=messages, response_format={'type': 'json_object', 'schema': schema})
-        try:
-            if response['choices'][0].get('finish_reason') == 'length':
-                raise ValueError('response truncated')
-            message = response['choices'][0]['message']
-            if not isinstance(message, dict) or message.get('role') != 'assistant':
-                raise ValueError('invalid assistant message')
-            thinking = message.get('reasoning_content') or message.get('thinking')
-            if isinstance(thinking, str) and thinking.strip():
-                self.last_thinking = thinking.strip()
-            content = message.get('content')
-            if not isinstance(content, str):
-                raise ValueError('response content must be JSON')
-            content = content.strip()
-            match = re.fullmatch(r'```(?:json)?\s*([\s\S]*?)\s*```', content, flags=re.IGNORECASE)
-            if match:
-                content = match.group(1)
-            data = json.loads(content)
-            jsonschema.validate(data, schema)
-            if 'name' in data:
-                message = {'role': 'assistant', 'content': None, 'tool_calls': [{
-                    'id': 'call_' + uuid.uuid4().hex, 'type': 'function',
-                    'function': {'name': data['name'], 'arguments': json.dumps(data['arguments'], ensure_ascii=False)}}]}
-            else:
-                message = {'role': 'assistant', 'content': json.dumps(data, ensure_ascii=False)}
-            calls = message.get('tool_calls') or []
-            if not isinstance(calls, list):
-                raise ValueError('invalid tool calls')
-            for call in calls:
-                function = call['function']
-                if not isinstance(call.get('id'), str) or not call['id'] or not isinstance(function.get('name'), str) or not function['name']:
-                    raise ValueError('tool call missing id or name')
-                arguments = function['arguments']
-                if not isinstance(arguments, str) or not isinstance(json.loads(arguments), dict):
-                    raise ValueError('invalid tool arguments')
-        except (KeyError, IndexError, TypeError, ValueError, jsonschema.ValidationError) as exc:
-            raise ValueError(f'Invalid llama.cpp chat response: {exc}') from exc
-        self.message = message
+        self.message = self.contract.normalize_response(response, schema)
+        self.last_thinking = self.contract.last_thinking
         return self.message
 
     # --------------------------------------------------------------------------
     # JSON Schema Composition for Structured Outputs
     # --------------------------------------------------------------------------
     def response_schema(self, tools, response_schema):
-        alternatives = []
-        for tool in tools:
-            function = tool['function']
-            parameters = deepcopy(function['parameters'])
-            parameters['additionalProperties'] = False
-            alternatives.append({'type': 'object', 'properties': {
-                'name': {'const': function['name']}, 'arguments': parameters},
-                'required': ['name', 'arguments'], 'additionalProperties': False})
-        alternatives.append(response_schema)
-        return {'oneOf': alternatives}
+        return self.contract.build_schema(tools, response_schema)
 
     # --------------------------------------------------------------------------
     # Text-Based Tool Call Parsing Fallback
