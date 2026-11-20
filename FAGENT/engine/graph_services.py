@@ -14,6 +14,7 @@ from ..capabilities.layout.layout_service import LayoutService
 from ..integrations.eda_tools.drc_runner import DrcRunner
 from ..integrations.eda_tools.lvs_runner import LvsRunner
 from ..integrations.models.llama_adapter import LlamaAdapter
+from ..integrations.models.openai_adapter import OpenAIAdapter
 from ..rag.case_learner import CaseLearner
 from ..rag.hybrid_retriever import HybridRetriever
 from .trace import Trace
@@ -48,6 +49,7 @@ class GraphServices:
         self.config_digest = sha256(json.dumps([config, self.custom_prompt], sort_keys=True).encode()).hexdigest()
         self.layout = None
         self.client = None
+        self.embedding_client = None
         self.rag = None
         self.messages = []
         self.input_sources = None
@@ -112,9 +114,18 @@ class GraphServices:
     # --------------------------------------------------------------------------
     # Environment and Subsystem Preparation
     # --------------------------------------------------------------------------
+    def build_chat_client(self):
+        backend = self.config.get('chat_backend', 'llama')
+        if backend == 'llama':
+            return LlamaAdapter(self.config)
+        if backend == 'openai':
+            return OpenAIAdapter(self.config)
+        raise ValueError(f'Unknown chat_backend: {backend!r}')
+
     def prepare(self, resume=False):
         if not self.workflow.layout_services:
-            self.client = LlamaAdapter(self.config)
+            self.client = self.build_chat_client()
+            self.embedding_client = None
             self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
             return self.messages
         self.layout = LayoutService(self.rundir, self.verbose, self.config.get('drc_files')).run()
@@ -124,12 +135,14 @@ class GraphServices:
             'layer_maps': self.layout.gds_data.get('layer_maps', []),
             'decks': self.layout.drc_files,
         }
-        self.client = LlamaAdapter(self.config)
+        self.client = self.build_chat_client()
         if resume:
             self.rag = None
+            self.embedding_client = None
             self.messages = []
             return self.messages
-        self.rag = HybridRetriever(self.config.get('knowledge_dir'), self.config, embedding_client=self.client).run()
+        self.embedding_client = LlamaAdapter(self.config)
+        self.rag = HybridRetriever(self.config.get('knowledge_dir'), self.config, embedding_client=self.embedding_client).run()
         self.rag.migrate_legacy(self.rag.knowledge_dir / 'knowledge_db.json')
         if self.config.get('reference_dir'):
             self.rag.index_documents(self.config['reference_dir'])
