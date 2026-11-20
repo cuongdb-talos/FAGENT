@@ -14,20 +14,23 @@ backend: local
 steps:
 - id: read
   action: steps:read_drc
-  next: repair
-- id: repair
-  action: agent
-  next: validate
-  tools:
-  - tools:read_gds
-  - tools:replace_polygon
-- id: validate
-  action: steps:validate_drc
-  next: human_review
-- id: human_review
-  action: review
   next: END
-  continue: repair
+# - id: read
+#   action: steps:read_drc
+#   next: repair
+# - id: repair
+#   action: agent
+#   next: validate
+#   tools:
+#   - tools:read_gds
+#   - tools:replace_polygon
+# - id: validate
+#   action: steps:validate_drc
+#   next: human_review
+# - id: human_review
+#   action: review
+#   next: END
+#   continue: repair
 prepare: steps:prepare
 layout_services: true
-knowledge_review: true
+#knowledge_review: true

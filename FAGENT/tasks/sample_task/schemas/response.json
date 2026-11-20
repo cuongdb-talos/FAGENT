@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "The agent must return the normalized text read from the tool.",
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"}
+  },
+  "required": ["summary"],
+  "additionalProperties": false
+}

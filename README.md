@@ -22,11 +22,12 @@ layer_map_files: [config/layer_mapping]
 tasks:
   - drc:
       drc_folder: DRC
+      gds_folder: DRC
       drc_files: DRC/rules.drc
       prompt: Fix DRC errors.
 ```
 
-Mỗi cell lấy `<cell>.gds` và `<cell>.drc.results` từ `drc_folder`. Artifact nằm ở `output/<cell>/rundir/`. Với LVS, chọn `tasks: [{lvs: {}}]`; artifact nằm ở `output/lvs/rundir/`.
+Mỗi cell lấy `<cell>.gds` từ `gds_folder` và `<cell>.drc.results` từ `drc_folder`. Artifact nằm ở `output/<cell>/rundir/`. Với LVS, chọn `tasks: [{lvs: {}}]`; artifact nằm ở `output/lvs/rundir/`.
 
 ## Định nghĩa task
 
@@ -51,7 +52,7 @@ steps:
   - {id: inspect, action: agent, tools: ['tools:inspect_layer'], next: END}
 ```
 
-Expose callable qua tên trong module, ví dụ `read_gds = LayoutSteps.run`. Step nhận `TaskContext` và trả về cập nhật state tương thích JSON. Tool nhận context và đối số khai báo qua `@tool(description=..., parameters=...)`. Engine kiểm tra tên tool và JSON Schema trước khi gọi. Các module task là Python tin cậy của dự án. Action `review` dùng `continue` để chỉ bước chạy lại và `next` cho quyết định dừng.
+Expose callable qua tên trong module, ví dụ `read_gds = LayoutSteps.run`. Step nhận `TaskContext` và trả về cập nhật state tương thích JSON. Tool nhận context và đối số khai báo trong schema của `ToolSpec` gắn trực tiếp vào hàm qua `my_tool.task_tool = ToolSpec(my_tool, description, parameters)`. Engine kiểm tra tên tool và JSON Schema trước khi gọi. Các module task là Python tin cậy của dự án. Action `review` dùng `continue` để chỉ bước chạy lại và `next` cho quyết định dừng.
 
 ## Trace, review và validation
 

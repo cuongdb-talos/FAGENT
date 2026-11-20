@@ -135,10 +135,11 @@ class GraphNodes:
             messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
         return {**updates, 'messages': messages, 'pending_tools': False}
 
-    @staticmethod
     def node_name(step_id):
         """Keep workflow identifiers that overlap LangGraph state channels."""
         return f'step--{step_id}' if step_id in FagentState.__annotations__ else step_id
+
+    node_name = staticmethod(node_name)
 
     def route_task_step(self, state, step):
         """Follow the successful route or terminate after a failure."""

@@ -1,9 +1,9 @@
 {
   "chat_backend": "openai",
   "base_url": "https://api.tokenlab.amd.com/v1",
-  "agent_model_path": "DeepSeek-V4-Flash",
-  "api_key_env": "TOKENLAB_API_KEY",
-  "embedding_model_path": "<path-to-local-embedding-model.gguf>",
+  "agent_model_path": "Qwen3.8-27B",
+  "api_key_env": "tl-43f204119fb52890852c0fff52c7b5edfb39b3692dd07844",
+  "embedding_model_path": "/mnt/d74b9a13-9fbd-4687-8385-e72dd5e811b1/AI_BUNDLE/models/embeddings/bge-m3-q8_0.gguf",
   "embedding_n_ctx": 8192,
   "embedding_n_threads": null,
   "embedding_n_gpu_layers": 0,
@@ -11,5 +11,5 @@
   "max_iterations": 20,
   "rag_limit": 5,
   "rag_context_chars": 8000,
-  "system_prompt_file": "knowledge/templates/prompts/drc_site.md"
+  "system_prompt_file": "FAGENT/knowledge/templates/prompts/drc_site.md"
 }

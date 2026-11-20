@@ -32,7 +32,6 @@ class Fagent:
     DEFAULT_CONFIG = PACKAGE_DIR / 'config.json'
     DEFAULT_SETUP = 'env_setup.yaml'
     TASK_ROOT = PACKAGE_DIR / 'tasks'
-    ARTIFACT_FILES = ('graph-checkpoints.sqlite3', 'conversation.json', 'result.json')
     PROMPT_MIGRATION = {
         'knowledge/prompts/drc_site.md': 'knowledge/templates/prompts/drc_site.md',
         'knowledge/prompts/drc.md': 'tasks/drc/prompts/drc.md',
@@ -66,9 +65,10 @@ class Fagent:
         self.setup_path = None
         self.result = []
 
-    @classmethod
     def main(cls, argv: list[str] | None = None) -> int:
         return cls(argv).run()
+
+    main = classmethod(main)
 
     # --------------------------------------------------------------------------
     # Helper & Validation Utilities
@@ -153,12 +153,7 @@ class Fagent:
             else:
                 runs = ((rundir, task_config, task_cfg),)
             for rundir, run_config, inputs in runs:
-                for name in self.ARTIFACT_FILES:
-                    artifact = rundir / name
-                    if artifact.exists() or artifact.is_symlink():
-                        self.fail(f'Output already exists: {artifact}')
                 result = self.run_graph(rundir, workflow, run_config, inputs)
-                print(json.dumps(result, ensure_ascii=False))
                 results.append(result)
         return results
 

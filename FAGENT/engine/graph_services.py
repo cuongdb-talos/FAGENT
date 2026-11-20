@@ -58,7 +58,6 @@ class GraphServices:
     # --------------------------------------------------------------------------
     # Static Validation and Checksum Utilities
     # --------------------------------------------------------------------------
-    @staticmethod
     def candidate_digest(path):
         digest = sha256()
         if not path.is_file():
@@ -70,7 +69,8 @@ class GraphServices:
                 chunk = stream.read(1024 * 1024)
         return digest.hexdigest()
 
-    @staticmethod
+    candidate_digest = staticmethod(candidate_digest)
+
     def clean_rule(rule):
         return (
             isinstance(rule, dict)
@@ -80,6 +80,8 @@ class GraphServices:
             and rule['total_count'] == 0
             and rule.get('geometry') == []
         )
+
+    clean_rule = staticmethod(clean_rule)
 
     # --------------------------------------------------------------------------
     # Prompt Composition and RAG Context Formatting

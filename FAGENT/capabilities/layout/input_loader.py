@@ -5,6 +5,7 @@
 # ==============================================================================
 import json
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 # ==============================================================================
 # SECTION 2: Internal FAGENT Module Imports
@@ -24,8 +25,6 @@ class InputLoader(DrcParser):
     # --------------------------------------------------------------------------
     GDS_OUTPUT = 'gds.json'
     DRC_OUTPUT = 'drc.json'
-    ARTIFACT_FILES = ('candidate.gds', 'conversation.json', 'result.json', 'graph-checkpoints.sqlite3')
-    OUTPUT_FILES = (GDS_OUTPUT, DRC_OUTPUT) + ARTIFACT_FILES
 
     # --------------------------------------------------------------------------
     # Main Ingestion Entry Point
@@ -42,15 +41,15 @@ class InputLoader(DrcParser):
         if None in (self.gds_path, self.drc_path, self.output_dir):
             raise ValueError('gds_path, drc_path, and output_dir must be provided')
 
-     
-        for source in (self.gds_path, self.drc_path, *map(Path, self.layer_map_files or ())):
+        sources = (self.gds_path, self.drc_path, *map(Path, self.layer_map_files or ()))
+        for source in sources:
             if not source.is_file():
                 raise ValueError(f'Input file does not exist: {source}')
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        for name in self.OUTPUT_FILES:
+        for name in (self.GDS_OUTPUT, self.DRC_OUTPUT):
             target = self.output_dir / name
-            if target.exists() or target.is_symlink():
-                raise ValueError(f'Output already exists: {target}')
+            if any(target.resolve() == source.resolve() for source in sources):
+                raise ValueError(f'Output must not overwrite input: {target}')
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.verbose:
             print("[Phase 1/5] Ingesting Layout & Calibre DRC Results")
@@ -65,6 +64,8 @@ class InputLoader(DrcParser):
             'database': self.gds_reader.gds_db,
         }
         self.drc_data = self.read_drc(self.drc_path)
+        if 'rules' in self.drc_data:
+            self.drc_data['rules'] = [rule for rule in self.drc_data['rules'] if rule.get('geometry')]
         self.write_json(self.GDS_OUTPUT, self.gds_data)
         self.write_json(self.DRC_OUTPUT, self.drc_data)
 
@@ -95,6 +96,12 @@ class InputLoader(DrcParser):
     # Atomic JSON Serialization
     # --------------------------------------------------------------------------
     def write_json(self, name, data):
-        with (self.output_dir / name).open('x') as output:
-            json.dump(data, output, indent=2)
-            output.write('\n')
+        output = NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.output_dir, delete=False)
+        temporary = Path(output.name)
+        try:
+            with output:
+                json.dump(data, output, indent=2)
+                output.write('\n')
+            temporary.replace(self.output_dir / name)
+        finally:
+            temporary.unlink(missing_ok=True)

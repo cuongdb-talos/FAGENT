@@ -419,7 +419,6 @@ class ProcessGDS:
         
         return poly
 
-    @staticmethod
     def _get_dir(p0, p1):
         dx = p1[0] - p0[0]
         dy = p1[1] - p0[1]
@@ -427,6 +426,8 @@ class ProcessGDS:
         if length == 0:
             return 0.0, 0.0
         return dx / length, dy / length
+
+    _get_dir = staticmethod(_get_dir)
 
     # --- Layer map loader: map (layer, datatype) pairs to layer names and purposes ---
     def read_layer_mapping(self):

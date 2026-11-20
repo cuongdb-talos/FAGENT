@@ -34,7 +34,6 @@ class DrcParser:
     # --------------------------------------------------------------------------
     # Format Dispatcher and Loader
     # --------------------------------------------------------------------------
-    @staticmethod
     def read_drc(path):
         content = Path(path).read_text(errors='replace')
         if 'CALIBRE::DRC' in content or '--- SUMMARY' in content or 'RULECHECK RESULTS STATISTICS' in content:
@@ -43,10 +42,11 @@ class DrcParser:
         data['clean'] = (data.get('total_violations', 0) == 0)
         return data
 
+    read_drc = staticmethod(read_drc)
+
     # --------------------------------------------------------------------------
     # Summary Report Parser (.drc.summary)
     # --------------------------------------------------------------------------
-    @staticmethod
     def parse_drc_summary(path):
         lines = Path(path).read_text(errors='replace').splitlines()
         content = '\n'.join(lines)
@@ -115,10 +115,11 @@ class DrcParser:
 
         return data
 
+    parse_drc_summary = staticmethod(parse_drc_summary)
+
     # --------------------------------------------------------------------------
     # ASCII Results Database Parser (.drc.results)
     # --------------------------------------------------------------------------
-    @staticmethod
     def parse_drc(path):
         lines = Path(path).read_text(errors='replace').splitlines()
         if not lines or not re.fullmatch(r'\S+\s+\d+', lines[0].strip()):
@@ -166,3 +167,5 @@ class DrcParser:
         return {'source': str(Path(path).resolve()), 'top_cell': top_cell,
                 'dbu_per_user_unit': scale, 'rules': rules,
                 'total_violations': sum(rule['total_count'] for rule in rules)}
+
+    parse_drc = staticmethod(parse_drc)

@@ -55,7 +55,8 @@ class Steps:
         maps = setup['layer_map_files']
         if not isinstance(maps, list) or not maps or any(not isinstance(p, str) or not p.strip() for p in maps):
             raise ValueError('layer_map_files must contain paths')
-        directory = base / task_cfg['drc_folder']
+        drc_directory = base / task_cfg['drc_folder']
+        gds_directory = base / task_cfg['gds_folder']
         decks = task_cfg['drc_files']
         if isinstance(decks, str):
             decks = [decks]
@@ -73,8 +74,8 @@ class Steps:
                 continue
             if cell in {'.', '..'} or Path(cell).name != cell:
                 raise ValueError(f'Invalid cell name: {cell}')
-            gds = directory / f'{cell}.gds'
-            drc = directory / f'{cell}.drc.results'
+            gds = gds_directory / f'{cell}.gds'
+            drc = drc_directory / f'{cell}.drc.results'
             resolved_maps = [(base / path).resolve() for path in maps]
             rundir = output / cell / 'rundir'
             InputLoader(gds_path=gds, drc_path=drc, output_dir=rundir,

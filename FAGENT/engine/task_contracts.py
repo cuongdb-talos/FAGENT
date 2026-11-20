@@ -2,12 +2,10 @@
 
 # === SECTION 1: Imports ===
 from dataclasses import dataclass
-from functools import partial
 from typing import Callable
 
 
 # === SECTION 2: Task contracts ===
-@dataclass(frozen=True)
 class TaskContext:
     """Expose task inputs, prior state, and runtime services to a callable."""
 
@@ -17,7 +15,9 @@ class TaskContext:
     services: object
 
 
-@dataclass(frozen=True)
+TaskContext = dataclass(TaskContext, frozen=True)
+
+
 class ToolSpec:
     """Bind a model-visible schema to its task callable."""
 
@@ -32,25 +32,14 @@ class ToolSpec:
         }}
 
 
-class ToolDecorator:
-    """Attach tool metadata without wrapping its callable."""
-
-    @staticmethod
-    def run(function, *, description, parameters):
-        """Return the callable with metadata attached."""
-        function.task_tool = ToolSpec(function, description, parameters)
-        return function
-
-    def __init__(self):
-        """Initialize the stateless decorator factory."""
+ToolSpec = dataclass(ToolSpec, frozen=True)
 
 
-tool = partial(partial, ToolDecorator.run)
-
-
-@dataclass(frozen=True)
 class ToolResult:
     """Return a model-visible payload and separate checkpoint state updates."""
 
     payload: dict
     updates: dict
+
+
+ToolResult = dataclass(ToolResult, frozen=True)

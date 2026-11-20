@@ -4,5 +4,6 @@ output_folder : "output"
 tasks :
   - drc :
       drc_folder : "DRC"
+      gds_folder : "DRC"
       drc_files : "DRC/1P7M_6Ic_1TKMc_ALPA2.drc"
       prompt : "Fix all DRC errors but ignore error about density."

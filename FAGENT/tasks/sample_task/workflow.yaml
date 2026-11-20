@@ -1,0 +1,30 @@
+# Keep the task name equal to the directory name.
+task: sample_task
+version: 1
+# Required keys in the task configuration passed to the graph.
+inputs: [text]
+
+# Task-relative assets used by the optional agent step.
+prompts: [prompts/sample.md]
+schema: schemas/response.json
+protocol: knowledge/templates/prompts/protocol.md
+
+# The first step is the entry point. Use END to finish the graph.
+steps:
+  - id: normalize
+    action: steps:normalize
+    next: END
+    # Set next to analyze and uncomment the block below to enable the agent.
+  # - id: analyze
+  #   action: agent
+  #   tools: [tools:read_summary]
+  #   next: END
+  #   # Set next to human_review to enable interactive review.
+  # - id: human_review
+  #   action: review
+  #   next: END
+  #   continue: normalize
+
+# Optional shared assets for interpreting human review feedback.
+# review_prompt: knowledge/templates/prompts/review.md
+# review_schema: knowledge/templates/schemas/review.json

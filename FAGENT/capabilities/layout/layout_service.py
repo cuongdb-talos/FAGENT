@@ -62,9 +62,10 @@ class LayoutService:
     # --------------------------------------------------------------------------
     # Allowed Capabilities Configuration
     # --------------------------------------------------------------------------
-    @staticmethod
     def allowed_tools():
         return {'read_gds', 'replace_polygon', 'save_gds', 'validate'}
+
+    allowed_tools = staticmethod(allowed_tools)
 
     # --------------------------------------------------------------------------
     # Layout and DRC Inspection Methods
