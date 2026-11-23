@@ -8,9 +8,20 @@ import json
 import math
 from pathlib import Path
 import re
+import sys
 import uuid
 
 import jsonschema
+from llama_cpp import (
+    GGML_TYPE_F16,
+    GGML_TYPE_F32,
+    GGML_TYPE_Q4_0,
+    GGML_TYPE_Q4_1,
+    GGML_TYPE_Q5_0,
+    GGML_TYPE_Q5_1,
+    GGML_TYPE_Q8_0,
+    Llama,
+)
 
 
 # ==============================================================================
@@ -144,13 +155,16 @@ class LlamaAdapter:
             model_path = self.config[f'{purpose}_model_path']
             if factory is None:
                 model_path = str(Path(model_path).expanduser().resolve(strict=True))
-                from llama_cpp import Llama
                 factory = Llama
             options = {'model_path': model_path, 'verbose': False}
-            for key in ('n_ctx', 'n_threads', 'n_gpu_layers'):
+            for key in ('n_ctx', 'n_threads', 'n_gpu_layers', 'flash_attn', 'offload_kqv'):
                 value = self.config.get(f'{purpose}_{key}')
                 if value is not None:
                     options[key] = value
+            for key in ('type_k', 'type_v'):
+                raw_val = self.config.get(f'{purpose}_{key}')
+                if raw_val is not None:
+                    options[key] = self.parse_ggml_type(raw_val, f'{purpose}_{key}')
             if purpose == 'agent' and self.config.get('agent_chat_format'):
                 options['chat_format'] = self.config['agent_chat_format']
             if purpose == 'embedding':
@@ -158,6 +172,29 @@ class LlamaAdapter:
             model = factory(**options)
             setattr(self, attr, model)
         return model
+
+    # --------------------------------------------------------------------------
+    # GGML Quantization Type Parsing
+    # --------------------------------------------------------------------------
+    def parse_ggml_type(self, raw_value, param_name):
+        """Converts raw string or integer GGML quantization type specification."""
+        type_map = {
+            'f32': GGML_TYPE_F32,
+            'f16': GGML_TYPE_F16,
+            'q4_0': GGML_TYPE_Q4_0,
+            'q4_1': GGML_TYPE_Q4_1,
+            'q5_0': GGML_TYPE_Q5_0,
+            'q5_1': GGML_TYPE_Q5_1,
+            'q8_0': GGML_TYPE_Q8_0,
+        }
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, str):
+            key = raw_value.strip().lower()
+            if key in type_map:
+                return type_map[key]
+        sys.stderr.write(f"[ERROR] Invalid {param_name}: '{raw_value}'. Must be int or one of {list(type_map.keys())}\n")
+        raise ValueError(f"Invalid {param_name}: '{raw_value}'")
 
     # --------------------------------------------------------------------------
     # Chat Completion & Response Validation

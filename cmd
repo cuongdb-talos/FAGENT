@@ -1,2 +1,3 @@
 #!/bin/bash
-python3 -m FAGENT --setup env_setup.yaml --config config_api.json --verbose 
+rm -r output
+python3 -m FAGENT --setup env_setup.yaml  --verbose

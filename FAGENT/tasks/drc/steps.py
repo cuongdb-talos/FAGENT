@@ -27,8 +27,9 @@ class Steps:
         return [*state.get('messages', []), {'role': 'user', 'content': json.dumps(payload)}]
 
     def read_drc(self, context):
-        report = context.services.read_drc()
-        return {'report': report, 'messages': self.append_context(context.state, {'drc': report})}
+        drc_context = context.services.build_drc_context()
+        return {'report': context.services.drc_report, 'drc_context': drc_context,
+                'messages': self.append_context(context.state, {'drc_context': drc_context})}
 
     def validate_drc(self, context):
         candidate = context.state.get('candidate_path')

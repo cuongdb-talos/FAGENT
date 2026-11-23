@@ -1,0 +1,455 @@
+{
+  "status": "incomplete",
+  "reason": "drc/repair: iteration limit reached",
+  "run_id": "15:41:45-23Nov2026-drc",
+  "thread_id": "66f2aa6e09524c458ea7abd8425fa06c",
+  "rundir": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/output/ROM_MCELL0/runs/15:41:45-23Nov2026-drc/rundir",
+  "task": {
+    "task": "drc",
+    "version": 1,
+    "digest": "6036cffd10840a246c8f03bbb9f949edeed5ddcf877e27af5d50225dff32ef8c",
+    "config_digest": "3592a4ec6033ce8eef5ba6e03cb1ab4528d993fc8169034ced909a43415afc17"
+  },
+  "inputs": {
+    "gds": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/DRC/ROM_MCELL0.gds",
+    "drc": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/DRC/ROM_MCELL0.drc.results",
+    "layer_maps": [
+      "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/config/layer_mapping"
+    ],
+    "decks": [
+      "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/DRC/1P7M_6Ic_1TKMc_ALPA2.drc"
+    ]
+  },
+  "step_outputs": {
+    "report": {
+      "source": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/DRC/ROM_MCELL0.drc.results",
+      "top_cell": "ROM_MCELL0",
+      "dbu_per_user_unit": 1000,
+      "rules": [
+        {
+          "name": "AA_D_10b_Min",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "Global AA density for fully chip (including dummy AA)>= 0.23",
+            "<= 0.75"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  -110,
+                  -65
+                ],
+                [
+                  330,
+                  -65
+                ],
+                [
+                  330,
+                  520
+                ],
+                [
+                  -110,
+                  520
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "GT_D_7b_Min",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "Global GT density for fully chip (including dummy)>= 0.1",
+            "<= 0.45"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  -110,
+                  -65
+                ],
+                [
+                  330,
+                  -65
+                ],
+                [
+                  330,
+                  520
+                ],
+                [
+                  -110,
+                  520
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "GT_A_13",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "GT area, except INST region.>= 0.038um2"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  -90,
+                  210
+                ],
+                [
+                  310,
+                  210
+                ],
+                [
+                  310,
+                  270
+                ],
+                [
+                  -90,
+                  270
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "CT_EN_7a_7b",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "CT_EN_7a:  M1 enclosure of CT, except INST region.>= 0um",
+            "CT_EN_7b:  M1 enclosure of CT when M1 enclosure on one or both perpendicular directions < 0.025um, except INST region.>= 0.025um"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  65,
+                  70
+                ],
+                [
+                  118,
+                  70
+                ],
+                [
+                  118,
+                  160
+                ],
+                [
+                  65,
+                  160
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "CT_R_11",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "CT must be fully covered by M1 and (AA OR GT), except INST region."
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  65,
+                  70
+                ],
+                [
+                  118,
+                  70
+                ],
+                [
+                  118,
+                  160
+                ],
+                [
+                  65,
+                  160
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "BD_R_1_AA",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "Border layer must enclose all chip layout patterns (all chip design, excluding MARKS, NODMF marking layer)",
+            "This rule is not applicable if customers insert seal ring by themselves.",
+            "This rule checking layer are DNW,AA,NW,PSUB,VTNH,VTPH,LVN, LVP,DG,GT,SN,SP, HRP, ESD1, SAB,CT,Mn(n=1-8),Vn(n=1-7), TV1,TV2,TM1,TM2, TKM, RV,BCB1,BCB2,RDL, FUSE,AADUM,GTDUM,MnDUM(n=1-8),TM1DUM,TM2DUM, TKMDM.>= 0.37um"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  220,
+                  0
+                ],
+                [
+                  220,
+                  400
+                ],
+                [
+                  216,
+                  400
+                ],
+                [
+                  216,
+                  320
+                ],
+                [
+                  170,
+                  320
+                ],
+                [
+                  110,
+                  207
+                ],
+                [
+                  50,
+                  320
+                ],
+                [
+                  4,
+                  320
+                ],
+                [
+                  4,
+                  396
+                ],
+                [
+                  216,
+                  396
+                ],
+                [
+                  216,
+                  400
+                ],
+                [
+                  0,
+                  400
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "BD_R_1_GT",
+          "reported_count": 2,
+          "total_count": 2,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "Border layer must enclose all chip layout patterns (all chip design, excluding MARKS, NODMF marking layer)",
+            "This rule is not applicable if customers insert seal ring by themselves.",
+            "This rule checking layer are DNW,AA,NW,PSUB,VTNH,VTPH,LVN, LVP,DG,GT,SN,SP, HRP, ESD1, SAB,CT,Mn(n=1-8),Vn(n=1-7), TV1,TV2,TM1,TM2, TKM, RV,BCB1,BCB2,RDL, FUSE,AADUM,GTDUM,MnDUM(n=1-8),TM1DUM,TM2DUM, TKMDM.>= 0.37um"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  220,
+                  0
+                ],
+                [
+                  220,
+                  210
+                ],
+                [
+                  0,
+                  210
+                ]
+              ]
+            },
+            {
+              "type": "p",
+              "id": 2,
+              "points_dbu": [
+                [
+                  0,
+                  270
+                ],
+                [
+                  220,
+                  270
+                ],
+                [
+                  220,
+                  400
+                ],
+                [
+                  0,
+                  400
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "BD_R_1_CT",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "Border layer must enclose all chip layout patterns (all chip design, excluding MARKS, NODMF marking layer)",
+            "This rule is not applicable if customers insert seal ring by themselves.",
+            "This rule checking layer are DNW,AA,NW,PSUB,VTNH,VTPH,LVN, LVP,DG,GT,SN,SP, HRP, ESD1, SAB,CT,Mn(n=1-8),Vn(n=1-7), TV1,TV2,TM1,TM2, TKM, RV,BCB1,BCB2,RDL, FUSE,AADUM,GTDUM,MnDUM(n=1-8),TM1DUM,TM2DUM, TKMDM.>= 0.37um"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  220,
+                  0
+                ],
+                [
+                  220,
+                  400
+                ],
+                [
+                  155,
+                  400
+                ],
+                [
+                  155,
+                  70
+                ],
+                [
+                  65,
+                  70
+                ],
+                [
+                  65,
+                  160
+                ],
+                [
+                  155,
+                  160
+                ],
+                [
+                  155,
+                  400
+                ],
+                [
+                  0,
+                  400
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "name": "BD_R_1_M1",
+          "reported_count": 1,
+          "total_count": 1,
+          "description": [
+            "Rule File Pathname: /data/projects/FIP/MEMORY/users/hainv78/SRAM_FSEMI_55LL_ROM/lib/DRC/_1P7M_6Ic_1TKMc_ALPA2.drc_",
+            "Border layer must enclose all chip layout patterns (all chip design, excluding MARKS, NODMF marking layer)",
+            "This rule is not applicable if customers insert seal ring by themselves.",
+            "This rule checking layer are DNW,AA,NW,PSUB,VTNH,VTPH,LVN, LVP,DG,GT,SN,SP, HRP, ESD1, SAB,CT,Mn(n=1-8),Vn(n=1-7), TV1,TV2,TM1,TM2, TKM, RV,BCB1,BCB2,RDL, FUSE,AADUM,GTDUM,MnDUM(n=1-8),TM1DUM,TM2DUM, TKMDM.>= 0.37um"
+          ],
+          "geometry": [
+            {
+              "type": "p",
+              "id": 1,
+              "points_dbu": [
+                [
+                  0,
+                  0
+                ],
+                [
+                  220,
+                  0
+                ],
+                [
+                  220,
+                  400
+                ],
+                [
+                  218,
+                  400
+                ],
+                [
+                  218,
+                  4
+                ],
+                [
+                  118,
+                  4
+                ],
+                [
+                  118,
+                  396
+                ],
+                [
+                  218,
+                  396
+                ],
+                [
+                  218,
+                  400
+                ],
+                [
+                  0,
+                  400
+                ]
+              ]
+            }
+          ]
+        }
+      ],
+      "total_violations": 10,
+      "clean": false,
+      "omitted_clean_rule_count": 891
+    }
+  },
+  "candidate_digest": null,
+  "checklist_digest": null,
+  "validation": null,
+  "review": {
+    "authorized": false
+  }
+}

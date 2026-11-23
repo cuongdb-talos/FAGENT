@@ -1,187 +1,185 @@
 # Luồng thực thi FAGENT
 
+Tài liệu này mô tả trạng thái mã và cấu hình workflow hiện có trong workspace. `workflow.yaml` của từng task quyết định các bước thực sự được chạy; sự tồn tại của một hàm trong mã không có nghĩa là bước đó đã được bật.
+
+## Cấu trúc task và LangGraph
+
+Mỗi task là một package khai báo workflow và cung cấp các thành phần được workflow tham chiếu. Engine dùng chung nạp package, dựng graph và chạy từng bộ input do task chuẩn bị.
+
 ```mermaid
-flowchart TD
-    Setup["env_setup.yaml + config.json"] --> CLI["Fagent.run()"]
-    CLI --> Loader["WorkflowLoader.run()"]
-    Loader --> Task["tasks/&lt;task&gt;/workflow.yaml"]
-    Task --> Prep["Chuẩn bị đầu vào theo task"]
-    Prep --> Runner["GraphRunner.run() + SQLite"]
-    Runner --> Graph["GraphBuilder.run()"]
-    Graph --> Step["Bước Python trong task"]
-    Graph --> Agent["Agent dùng prompt, schema và tools của bước"]
-    Agent --> Tools["Kiểm tra JSON Schema và gọi tool"]
-    Tools --> Agent
-    Graph --> Review["Review interrupt"]
-    Review -->|continue| Graph
-    Review -->|stop| Out["result.json + conversation.json"]
-    Out -->|đồng ý lưu| RAG["CaseLearner"]
+flowchart LR
+    Setup["setup YAML<br/>chọn task và input"] --> CLI["Fagent"]
+    Config["config JSON<br/>model và dịch vụ"] --> CLI
+    CLI --> Loader["WorkflowLoader<br/>nạp và xác thực"]
+
+    subgraph Package["FAGENT/tasks/task_name/"]
+        WF["workflow.yaml<br/>inputs, steps, routes"]
+        Prepare["steps.py: prepare<br/>tùy chọn"]
+        Steps["steps.py<br/>Python step"]
+        Tools["tools.py<br/>ToolSpec và callable"]
+        Assets["prompts/ và schemas/<br/>asset của agent"]
+        WF -. "prepare" .-> Prepare
+        WF -. "action: steps:..." .-> Steps
+        WF -. "agent.tools" .-> Tools
+        WF -. "prompt và schema" .-> Assets
+    end
+
+    Loader --> WF
+    Loader --> Definition["Workflow đã xác thực<br/>và digest"]
+    Definition --> Builder["GraphBuilder"]
+    Prepare -->|"rundir, config, inputs"| Runner["GraphRunner"]
+    CLI -->|"không có prepare: một lượt"| Runner
+    Definition --> Services["GraphServices"]
+    Config --> Services
+    Services --> Builder
+    Builder -->|"compile StateGraph"| Runner
+    Runner --> Checkpoint[("SQLite checkpoint")]
+    Runner --> Artifacts["result.json<br/>conversation.json"]
 ```
 
-## Trách nhiệm các module
+`workflow.yaml` chọn callable và route; `GraphNodes` thực thi chúng thông qua `TaskContext` và `GraphServices`. Đường nét đứt thể hiện tham chiếu khai báo, không phải thứ tự thực thi. Nếu không có `prepare`, CLI tạo một lượt từ cấu hình task.
 
-| Module | Trách nhiệm |
-| --- | --- |
-| `FAGENT/fagent.py` | Đọc setup và cấu hình chung, chọn task, chạy từng bộ đầu vào |
-| `engine/workflow_loader.py` | Kiểm tra đường dẫn, schema, callable, route và tính digest từ workflow cùng asset |
-| `engine/graph_builder.py`, `engine/graph_nodes.py` | Biên dịch route, chạy step, điều phối agent/tool và review |
-| `engine/graph_services.py` | Cấp dịch vụ model, layout, RAG và backend EDA |
-| `engine/graph_runner.py` | Điều phối SQLite checkpoint, tiếp nhận phản hồi và ghi artifact |
-| `engine/trace.py` | Ghi task, node, tool, trạng thái và route đã chọn khi bật `--verbose` |
-| `tasks/drc/` | Chuẩn bị báo cáo và GDS theo cell, kiểm tra thứ tự đọc trước sửa, lưu candidate và xác minh bằng chứng |
-| `tasks/lvs/` | Đọc trạng thái đầu vào và chạy kiểm tra mô phỏng đã cấu hình |
-| `knowledge/templates/` | Giao thức, prompt review, schema và mẫu báo cáo dùng chung |
+### Cấu trúc graph được biên dịch
 
-DRC đọc rule deck và layer map theo setup. Mỗi lần sửa lưu dấu SHA-256 của candidate vào state. Runner kiểm tra định danh workflow, cấu hình và candidate trước khi resume checkpoint. DRC/LVS mô phỏng gắn `simulated: true`; việc lưu tri thức yêu cầu người dùng đồng ý qua review.
+Sơ đồ sau mô tả các loại node và route tổng quát. Các cạnh `next` và `continue` trỏ đến ID cụ thể trong YAML; không phải task nào cũng có đủ mọi loại node.
 
-Trace ghi ra stderr. Trace ghi bằng tiếng Anh, kèm step và thao tác đang thực hiện. Khi chọn xong route, trace ghi node tiếp theo. Khi chờ review, trace ghi `Waiting for human feedback`. Conversation và các kết quả chi tiết nằm trong artifact của rundir.
+```mermaid
+flowchart TD
+    START(["START"]) --> First["Node của step đầu tiên<br/>trong workflow.yaml"]
+    First --> Kind{"Loại action"}
+    Kind -->|"steps:callable"| Python["Python step<br/>TaskContext → state updates"]
+    Kind -->|"agent"| Agent["Agent node<br/>gọi model và kiểm tra response"]
+    Kind -->|"review"| Review["Review node<br/>interrupt chờ feedback"]
 
-## Luồng chi tiết
+    Python -->|"next"| Next["Node tiếp theo hoặc END"]
+    Agent -->|"có tool calls"| Tool["Tool node: step_id--tools<br/>kiểm tra và gọi tool"]
+    Tool -->|"kết quả tool"| Agent
+    Agent -->|"response hợp lệ: next"| Next
+    Review -->|"continue"| Continue["Node theo continue"]
+    Review -->|"stop: next"| Next
+    Review -->|"unclear"| Review
+    Python -->|"lỗi"| END(["END"])
+    Agent -->|"lỗi hoặc hết iteration"| END
+    Tool -->|"lỗi node"| END
+    Next -->|"nếu route là END"| END
+```
 
-### 1. CLI, cấu hình và chuẩn bị từng lượt chạy
+Mỗi node đọc và cập nhật `FagentState`; checkpoint lưu state theo thread. Lỗi của một lệnh gọi tool riêng lẻ được đưa vào conversation để agent xử lý, còn lỗi của node có thể kết thúc graph.
 
-Cả `python -m FAGENT` và lệnh `fagent` gọi `Fagent.main()` rồi vào `Fagent.run()`. CLI đọc `--setup`, `--config` và `--verbose`. Setup chọn task và cung cấp đầu vào từng lượt chạy. Cấu hình JSON cung cấp môi trường model, tài nguyên và tri thức dùng chung. Các đường dẫn đầu vào tương đối trong setup được tính từ thư mục chứa YAML.
+### Ví dụ: graph DRC đang bật
 
-`Fagent.run_setup()` duyệt các mục trong `tasks`, nạp định nghĩa bằng `load_task_workflow()` và tạo cấu hình riêng cho lượt chạy. Nếu workflow khai báo `prepare`, hàm đó trả về từng bộ `(rundir, config, inputs)`. Workflow đơn giản có thể dùng trực tiếp cấu hình task làm đầu vào và chạy một lượt.
+```mermaid
+flowchart LR
+    Start(["START"]) --> Read["read<br/>steps:read_drc"]
+    Read --> Repair["repair<br/>agent"]
+    Repair -->|"tool calls"| Tools["repair--tools<br/>read_gds / replace_polygon"]
+    Tools --> Repair
+    Repair -->|"response hợp lệ"| Review["human_review<br/>interrupt"]
+    Review -->|"continue"| Repair
+    Review -->|"unclear"| Review
+    Review -->|"stop"| End(["END"])
+```
 
-| Task | Đầu vào | Thư mục chạy |
-| --- | --- | --- |
-| DRC | `list_cells`, `layer_map_files`, `drc_folder`, `drc_files` và prompt tùy chọn | `<output_folder>/<cell>/rundir/` |
-| LVS | Cấu hình task và đường dẫn báo cáo tùy chọn `lvs_report` | `<output_folder>/lvs/rundir/` |
+Bước `validate_drc` có trong mã nhưng đang bị comment trong YAML; `check_cover` cũng chưa được khai báo trong danh sách tool của agent. Cả hai không thuộc graph DRC hiện tại.
 
-Ví dụ, nếu `list_cells` chứa `ROM_MCELL0` và `drc_folder` là `DRC`, bước chuẩn bị lấy `DRC/ROM_MCELL0.gds` và `DRC/ROM_MCELL0.drc.results`. `InputLoader` gọi các bộ phân tích GDS và DRC, rồi ghi `gds.json` và `drc.json` trong rundir. CLI kiểm tra artifact đã tồn tại trước khi chạy graph.
+## Chạy và cấu hình
 
-### 2. Nạp và xác thực workflow
+Từ thư mục gốc dự án:
 
-1. `WorkflowLoader.run()` tìm `FAGENT/tasks/<task>/workflow.yaml` và kiểm tra định danh task, cấu trúc YAML, ID bước và route `next` hoặc `continue`.
-2. Loader xác thực đường dẫn prompt, schema và mã Python tham chiếu trước khi thực thi module. Đường dẫn tuyệt đối, thành phần `..` và symlink thoát khỏi thư mục cho phép bị từ chối. Mã task được thực thi với quyền của tiến trình FAGENT.
-3. Loader phân giải `module:callable`, kiểm tra chữ ký step/tool, metadata và JSON Schema. Mỗi bước agent có bộ tool riêng.
-4. Loader tính digest từ nội dung workflow, asset được tham chiếu và mã nguồn callable đã nạp. `GraphRunner` dùng digest này cùng định danh task, version và digest cấu hình khi kiểm tra checkpoint.
+```bash
+python -m FAGENT --setup env_setup.yaml --config FAGENT/config.json --verbose
+# Hoặc, sau khi cài package:
+fagent --setup env_setup.yaml --config FAGENT/config.json --verbose
+```
 
-### 3. Khởi tạo dịch vụ và chạy graph
+`Fagent.main()` gọi `Fagent.run()`, đọc setup YAML và config JSON rồi duyệt `tasks`. Đường dẫn tương đối trong setup được giải quyết từ thư mục chứa file YAML. Mỗi task được nạp từ `FAGENT/tasks/<task>/workflow.yaml`; tên task phải khớp tên thư mục. Nếu có `prepare`, callable này tạo các bộ `(rundir, config, inputs)` để chạy; nếu không, task dùng cấu hình đầu vào trực tiếp.
 
-`Fagent.run_graph()` tạo `GraphServices`. Container lắp adapter llama.cpp và ghép prompt task, prompt bổ sung và giao thức chung. Với workflow bật `layout_services`, container nạp `LayoutService`, chuẩn bị RAG, lập chỉ mục tài liệu và rule deck, rồi ghép các đoạn tham khảo được truy xuất vào ngữ cảnh.
+Ví dụ DRC:
 
-`GraphRunner.prepare_graph()` mở SQLite checkpointer, biên dịch graph qua `GraphBuilder.run()` và cấu hình thread cùng giới hạn đệ quy. Bước đầu trong YAML nối với `START`. Các route thực tế được chọn từ kết quả thực thi và khai báo của workflow.
+```yaml
+output_folder: output
+list_cells: list
+layer_map_files: [config/layer_mapping]
+tasks:
+  - drc:
+      drc_folder: DRC
+      gds_folder: DRC
+      drc_files: DRC/rules.drc
+      prompt: Fix DRC errors.
+```
 
-- **Step Python.** `GraphNodes.execute_step()` gọi callable với `TaskContext(task, inputs, state, services)`. Step trả về cập nhật state tương thích JSON. Nếu thiếu đầu vào bắt buộc hoặc step lỗi, graph ghi lỗi có định danh task/bước và trả `incomplete`.
-- **Agent.** `execute_agent()` gửi conversation, schema phản hồi và đúng danh sách tool của bước hiện tại. Nếu model gọi tool, graph chuyển đến node `<step>--tools`. Nếu model trả lời cuối, engine kiểm tra JSON Schema trước khi đi tới `next`.
-- **Tool.** `execute_tools()` kiểm tra ID lệnh gọi, tên tool và schema đối số trước khi gọi. Kết quả hoặc lỗi được đưa vào conversation với cùng `tool_call_id`. `ToolResult` có thể kèm cập nhật state, ví dụ đường dẫn và digest của candidate. Graph quay lại agent. Khi hết số vòng cho phép, lượt chạy kết thúc với `incomplete`.
-- **Review.** Node tạm dừng qua LangGraph interrupt. `continue` đi đến bước do workflow chỉ định. `unclear` lặp lại review. `stop` đi theo `next`.
+Với cell `ROM_MCELL0`, bước chuẩn bị đọc `DRC/ROM_MCELL0.gds`, `DRC/ROM_MCELL0.drc.results`, layer map và rule deck. Mỗi lần chạy DRC tạo thư mục mới `output/ROM_MCELL0/runs/<run_id>/rundir/`, trong đó `run_id` gồm thời gian UTC và phần định danh ngẫu nhiên. `InputLoader` phân tích đầu vào và ghi `gds.json`, `drc.json`. LVS dùng `output/lvs/rundir/`.
 
-### 4. Nhánh DRC và LVS
+Config chọn `chat_backend: llama` hoặc `openai` (mặc định là `llama`). Backend llama dùng model GGUF cục bộ. Backend `openai` dùng endpoint tương thích OpenAI với `base_url`, tên model trong `agent_model_path`, và `api_key_env` là tên biến môi trường chứa API key. Với task bật `layout_services`, embedding cho RAG vẫn dùng `LlamaAdapter`, kể cả khi chat dùng API. Xem `FAGENT/config.example.json` và `FAGENT/integrations/models/` để cấu hình phù hợp.
 
-| Bước | DRC | LVS |
-| --- | --- | --- |
-| `read` | Đọc `drc.json` và thêm các rule cần xử lý vào conversation | Đưa trạng thái đọc báo cáo và đường dẫn đầu vào tùy chọn vào conversation |
-| `repair` | Agent dùng `read_gds` để xem polygon, rồi có thể gọi `replace_polygon` | Trả trạng thái `unavailable` cho khả năng sửa LVS |
-| `validate` | Kiểm tra digest candidate trước khi gọi backend. Calibre Simulator xuất results và summary, sau đó runner đối chiếu top cell và tổng số vi phạm | Nếu cấu hình bật mock cho backend local, trả `pass` với `simulated: true` |
-| `human_review` | Hiển thị bằng chứng và hỏi phản hồi. Người dùng có thể đồng ý lưu tri thức qua lời nhắc riêng | Hiển thị kết quả và hỏi phản hồi |
+## Nạp workflow và chạy graph
 
-Tool `replace_polygon` yêu cầu đọc đúng cell trước khi sửa. Marker trong báo cáo Calibre dùng DBU. Tọa độ tool dùng GDS user units, nên cần chia tọa độ DBU cho `dbu_per_user_unit`. Khi lưu thành công, tool cập nhật `candidate.gds` và SHA-256 của file. Bằng chứng DRC mô phỏng được đánh dấu `simulated: true`. Backend EDA thật hiện trả `unavailable`.
+1. `WorkflowLoader` đọc YAML, xác thực cấu trúc, ID bước, route, input, prompt, schema và callable. Các asset phải nằm trong phạm vi đường dẫn được phép. Loader tính digest từ workflow và các asset/mã được tham chiếu.
+2. `GraphServices` dựng prompt từ prompt task, prompt bổ sung, tham khảo RAG nếu có, và protocol. Với `layout_services: true`, service nạp layout, lập chỉ mục tài liệu tham khảo nếu được cấu hình cùng rule deck, rồi truy xuất tri thức liên quan. Các rule sạch được loại khỏi ngữ cảnh DRC.
+3. `GraphBuilder` biên dịch bước đầu thành điểm vào LangGraph. `GraphRunner` tạo SQLite checkpointer và chạy graph với thread riêng.
+4. Một bước Python nhận `TaskContext` gồm task, inputs, state và services, rồi trả mapping tương thích JSON. Lỗi bước hoặc thiếu input làm lượt chạy kết thúc `incomplete`.
+5. Bước `agent` gọi model với conversation, schema phản hồi và các tool được khai báo riêng cho bước. Khi model yêu cầu tool, engine kiểm tra ID, tên và JSON Schema của đối số, gọi tool và thêm kết quả vào conversation trước khi quay lại agent. Phản hồi cuối phải hợp lệ theo schema; quá `max_iterations` sẽ kết thúc `incomplete`.
+6. Bước `review` tạm dừng bằng interrupt. Feedback được phân loại `continue`, `stop` hoặc `unclear`: lần lượt đi tới `continue`, `next` hoặc hỏi lại. Feedback cũng được thêm vào conversation.
 
-### 5. Checkpoint, review và artifact
+## Task DRC hiện tại
 
-Trong cùng lượt chạy, `GraphRunner.finish()` nhận feedback ở mỗi interrupt và kiểm tra lại checkpoint trước khi tiếp tục. Để mở lại một review đã lưu qua API Python, chuẩn bị dịch vụ cho chế độ resume, tạo `GraphRunner` với cùng rundir và `thread_id`, rồi gọi `resume(feedback)`. Runner mở lại SQLite, kiểm tra review đang chờ và so sánh định danh workflow. Khi có candidate, runner kiểm tra đường dẫn và SHA-256 trước khi nạp lại layout. Thay đổi asset hoặc cấu hình có thể làm checkpoint cũ bị từ chối. CLI hiện cung cấp ba cờ `--setup`, `--config` và `--verbose`.
+Route đang bật trong `FAGENT/tasks/drc/workflow.yaml`:
+
+```text
+read -> repair (agent <-> tools) -> human_review
+                                      | continue -> repair
+                                      | stop     -> END
+```
+
+- `read` đưa báo cáo DRC vào conversation. `repair` dùng prompt và schema của task.
+- Agent hiện chỉ được cấp `read_gds` và `replace_polygon`. `read_gds` đọc polygon trực tiếp trong cell và ghi nhận cell đã được kiểm tra. `replace_polygon` yêu cầu đã đọc đúng cell, sửa theo `polygon_id`, lưu `candidate.gds`, lưu định danh polygon và ghi SHA-256 của candidate vào state. Tọa độ tool dùng GDS user units; marker Calibre dùng DBU và cần chuyển đổi bằng `dbu_per_user_unit`.
+- `check_cover` đã được định nghĩa trong `tasks/drc/tools.py` để kiểm tra enclosure giữa hai polygon trực tiếp, nhưng chưa được khai báo trong danh sách tools của workflow nên agent hiện không gọi được tool này.
+- `validate_drc` và backend Calibre Simulator có trong mã, nhưng bước `validate` đang được comment trong YAML và `repair.next` trỏ trực tiếp tới `human_review`. Vì vậy lượt DRC theo workflow hiện tại **không tự chạy validation**. Khi được nối vào workflow, validation kiểm tra digest candidate và dùng backend local mô phỏng; kết quả mô phỏng mang `simulated: true`. Backend EDA thật chưa được tích hợp.
+- `knowledge_review` hiện cũng đang được comment, nên workflow DRC hiện tại không yêu cầu hay cho phép lưu case qua review.
+
+Review tạo kết quả `incomplete` và trình bày response, candidate cùng validation nếu có; không xem câu trả lời của model là bằng chứng xác minh layout.
+
+## Task LVS hiện tại
+
+```text
+read -> repair -> validate -> human_review
+                                  | continue -> repair
+                                  | stop     -> END
+```
+
+`read` báo `unavailable` vì chưa hỗ trợ định dạng báo cáo LVS; `repair` là placeholder `unavailable`. YAML hiện đặt `backend: local` và `mock_pass: true`, vì vậy validation trả bằng chứng mock có `simulated: true`, không phải kết quả LVS thực. Các đường dẫn tùy chọn `lvs_report`, `layout`, `netlist`, `deck` được giải quyết từ thư mục setup. Review vẫn tạo kết quả `incomplete`.
+
+## Checkpoint, artifact và tri thức
+
+`GraphRunner` lưu checkpoint theo `thread_id` trong `graph-checkpoints.sqlite3`. Khi tiếp tục review, runner kiểm tra identity gồm task, version, digest workflow và digest config; nếu có candidate thì kiểm tra đường dẫn và SHA-256 trước khi nạp lại layout và định danh polygon. Có thể resume qua API Python với cùng rundir và thread ID; CLI hiện chỉ có `--setup`, `--config`, `--verbose`.
 
 | Artifact | Nội dung |
 | --- | --- |
-| `gds.json`, `drc.json` | Hình học và báo cáo đầu vào đã phân tích cho DRC |
-| `candidate.gds` | Layout DRC sau khi tool lưu lần sửa |
-| `drc-validation-*/` | Kết quả và summary từ Calibre Simulator |
+| `gds.json`, `drc.json` | Dữ liệu GDS và báo cáo DRC đã phân tích khi chuẩn bị input |
+| `candidate.gds`, `polygon_ids.json` | Candidate đã lưu và định danh polygon, nếu có sửa thành công |
+| `drc-validation-*/` | Kết quả mô phỏng DRC nếu bước validation được bật và chạy |
 | `graph-checkpoints.sqlite3` | State và interrupt theo thread |
-| `conversation.json` | Lịch sử conversation, kể cả lệnh gọi và phản hồi tool |
-| `result.json` | Định danh lượt chạy, trạng thái, bằng chứng, candidate digest và quyết định review |
+| `conversation.json` | Conversation, bao gồm yêu cầu và kết quả tool |
+| `result.json` | Trạng thái, identity, input, output của step, candidate digest, validation và review |
 
-`CaseLearner` chỉ chạy khi workflow bật lưu tri thức, review kết thúc với sự đồng ý rõ ràng và graph không bị lỗi. Với `--verbose`, trace đi ra stderr theo thứ tự thực thi, gồm cả các lượt lặp và trạng thái chờ feedback. Kết quả JSON của lượt chạy được in ra stdout sau khi ghi artifact.
+Khi workflow bật `knowledge_review`, người dùng có thể đồng ý lưu qua lời nhắc riêng. `CaseLearner` chỉ được gọi khi review kết thúc với sự đồng ý rõ ràng và graph không lỗi. `--verbose` ghi trace điều hướng ra stderr. Kết quả được ghi vào `result.json`; lỗi được ghi với tiền tố `[ERROR]`.
 
-## Cây thư mục
+## Mã nguồn chính
 
-```text
-.
-├── .agent/
-│   ├── AGENTS.md                      # Quy tắc làm việc của repo
-│   └── AI_Workflow.md                 # Tài liệu luồng hiện tại
-├── CALIBRE/
-│   └── calibre_simulator.py           # Mô phỏng DRC và xuất báo cáo
-├── DRC/                               # GDS, rule deck và báo cáo mẫu
-├── config/                            # Layer map và cấu hình hiển thị layer
-├── FAGENT/
-│   ├── __init__.py
-│   ├── __main__.py                    # Entry point python -m FAGENT
-│   ├── fagent.py                      # CLI, setup và điều phối từng lượt
-│   ├── config.json                    # Cấu hình môi trường cục bộ
-│   ├── config.example.json            # Mẫu cấu hình
-│   ├── capabilities/
-│   │   ├── drc/
-│   │   │   └── drc_parser.py          # Phân tích results và summary
-│   │   └── layout/
-│   │       ├── input_loader.py        # Kiểm tra và chuẩn bị artifact đầu vào
-│   │       ├── layout_service.py      # Đọc/sửa polygon và lưu GDS
-│   │       └── process_gds.py         # Phân tích GDSII và ánh xạ layer
-│   ├── engine/
-│   │   ├── fagent_state.py            # State tuần tự hóa của LangGraph
-│   │   ├── task_contracts.py          # TaskContext, metadata tool, ToolResult
-│   │   ├── workflow_loader.py        # Nạp, xác thực và tính digest
-│   │   ├── graph_builder.py          # Biên dịch node và route
-│   │   ├── graph_nodes.py            # Step, agent, tool, review và điều hướng
-│   │   ├── graph_runner.py           # Checkpoint, resume và artifact
-│   │   ├── graph_services.py         # Model, layout, RAG và EDA
-│   │   └── trace.py                  # Định dạng trace trực tiếp
-│   ├── integrations/
-│   │   ├── eda_tools/
-│   │   │   ├── drc_runner.py         # Backend DRC và đối chiếu báo cáo
-│   │   │   └── lvs_runner.py         # Backend mock LVS
-│   │   └── models/
-│   │       ├── __init__.py
-│   │       └── llama_adapter.py       # Chat, tool calling và embedding GGUF
-│   ├── knowledge/
-│   │   ├── rag.sqlite3               # Kho tri thức và vector
-│   │   ├── records.json              # Snapshot JSON của bản ghi
-│   │   └── templates/
-│   │       ├── prompts/
-│   │       │   ├── drc_site.md         # Hướng dẫn bổ sung cho site
-│   │       │   ├── protocol.md         # Giao thức phản hồi model
-│   │       │   └── review.md           # Prompt phân loại feedback
-│   │       ├── reports/
-│   │       │   └── drc_summary.txt     # Mẫu summary mô phỏng
-│   │       └── schemas/
-│   │           ├── review.json        # Schema phản hồi review
-│   │           └── workflow.json      # Schema định nghĩa workflow
-│   ├── rag/
-│   │   ├── __init__.py
-│   │   ├── case_learner.py            # Lưu case được review chấp thuận
-│   │   ├── hybrid_retriever.py        # Truy xuất rule, từ khóa và vector
-│   │   ├── knowledge_indexer.py       # Lập chỉ mục tài liệu và deck
-│   │   └── knowledge_store.py         # SQLite và snapshot
-│   └── tasks/
-│       ├── __init__.py
-│       ├── drc/
-│       │   ├── __init__.py
-│       │   ├── workflow.yaml          # read → repair → validate → review
-│       │   ├── steps.py               # Chuẩn bị theo cell, đọc và validate
-│       │   ├── tools.py               # read_gds và replace_polygon
-│       │   ├── prompts/drc.md
-│       │   └── schemas/drc.json
-│       └── lvs/
-│           ├── __init__.py
-│           ├── workflow.yaml          # read → placeholder → mock → review
-│           ├── steps.py               # Chuẩn bị, đọc, placeholder và validate
-│           ├── tools.py               # Module tool hiện chưa có callable
-│           ├── prompts/lvs.md
-│           └── schemas/lvs.json
-├── tests/
-│   ├── fixtures/tasks/migrate_gds/     # Task thử nghiệm có workflow, step, tool và asset
-│   ├── test_task_loader.py
-│   ├── test_task_execution.py
-│   ├── test_task_regression.py
-│   ├── test_trace.py
-│   └── test_package.py
-├── env_setup.yaml                     # Chọn task và đầu vào từng lượt
-├── list                               # Danh sách cell mẫu
-├── cmd                                # Lệnh chạy từ setup
-├── calibre.sh                         # Script chạy simulator
-├── pyproject.toml                     # Entry point và package data
-├── requirements.txt
-└── README.md
+| Đường dẫn | Trách nhiệm |
+| --- | --- |
+| `FAGENT/fagent.py` | CLI, setup và điều phối các lượt chạy |
+| `FAGENT/engine/workflow_loader.py` | Nạp, xác thực và tính digest workflow |
+| `FAGENT/engine/graph_builder.py`, `graph_nodes.py` | Xây graph, thực thi step, agent, tool và review |
+| `FAGENT/engine/graph_runner.py`, `graph_services.py` | Checkpoint, artifact, model, layout, RAG và backend EDA |
+| `FAGENT/tasks/drc/`, `FAGENT/tasks/lvs/` | Workflow, step, tool, prompt và schema theo task |
+| `FAGENT/capabilities/` | Phân tích DRC, đọc/sửa layout, định danh polygon và kiểm tra hình học |
+| `FAGENT/integrations/` | Adapter model và backend DRC/LVS |
+| `FAGENT/rag/`, `FAGENT/knowledge/` | Lập chỉ mục, truy xuất, lưu case và template dùng chung |
+| `FAGENT/tasks/sample_task/`, `FAGENT/tasks/README.md` | Task mẫu và hướng dẫn tạo task mới |
+
+Để kiểm tra nhanh các route và tool đang bật sau khi cấu hình thay đổi:
+
+```bash
+grep -nE '^(steps:|[[:space:]]*(- id:|action:|next:|continue:|tools:|knowledge_review:|layout_services:))' FAGENT/tasks/drc/workflow.yaml
 ```

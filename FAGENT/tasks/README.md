@@ -72,6 +72,17 @@ grep -nE '^(task|inputs|steps|prompts|schema):' FAGENT/tasks/my_task/workflow.ya
 
 Task DRC áp dụng kiến trúc quản lý sửa lỗi hướng checklist với các đặc điểm:
 
+Node `read` đọc báo cáo DRC đầy đủ và truy xuất knowledge một lần, sau đó
+tạo `drc_context` rút gọn chứa rule vi phạm, marker và tọa độ DBU, knowledge
+và goal. Các rule sạch được lược khỏi context; báo cáo đầy đủ vẫn nằm trong
+state để đối chiếu checklist. Marker ID là ID của vi phạm trong DRC report,
+không mặc định là polygon ID trong GDS; agent cần dùng `read_gds` để kiểm tra.
+Constraints chung nằm trong `FAGENT/knowledge/constraints.json`, là danh sách
+chuỗi JSON; chúng được thêm vào goal của cả `plan` và `repair`. Có thể chỉ định
+file khác bằng `constraints_file` trong config. Node `plan` tạo checklist;
+node `repair` nhận checklist và gọi tool. `conversation.json` được cập nhật
+sau mỗi phản hồi model và kết quả tool.
+
 1. **Cách ly lượt chạy (Run Isolation):**
    - Mỗi cell được chạy trong một thư mục độc lập: `output/<cell>/runs/<run_id>/rundir/`.
    - Giữ nguyên toàn bộ báo cáo vi phạm DRC, thứ tự và số lượng vi phạm gốc (kể cả rule không có hình học).
@@ -91,3 +102,13 @@ Task DRC áp dụng kiến trúc quản lý sửa lỗi hướng checklist với
 5. **Tính chân thực của xác minh (Verification Truthfulness):**
    - Đánh giá `pass` trên checklist là nhận định hình học của agent, **không phải kết quả DRC Calibre chính thức**.
    - Báo cáo kết quả cuối cùng giữ trạng thái `incomplete` trừ khi có bằng chứng chạy DRC thực tế hỗ trợ.
+6. **Truy vết Hội thoại Toàn diện (Complete Conversation Trace):**
+   - **Đường dẫn artifact:** Đường dẫn của trace luôn được xác định động từ thư mục chạy được cấu hình (`<rundir>/conversation.json`), không hard-code tên cell hay run ID.
+   - **Đặc tả Event Schema (Version 2):** Toàn bộ hội thoại và tương tác tool được lưu với định dạng `{"version": 2, "events": [...]}`. Mỗi event có các loại sau:
+     - `model_request`: Lưu `request_id`, nguyên vẹn mảng `messages` (chứa toàn bộ context nhạy cảm như DRC context, checklist, prompt hệ thống), danh sách đặc tả công cụ `tools`, và `response_schema` thực tế được truyền cho client.
+     - `model_response`: Lưu `request_id` tương ứng và `message` phản hồi của trợ lý (content và/hoặc `tool_calls`).
+     - `model_error`: Lưu `request_id`, `error_type` và `error_message` khi gọi client gặp ngoại lệ.
+     - `tool_result`: Lưu `message` kiểu tool (`role: "tool"`, `tool_call_id`, và `content` là chuỗi JSON kết quả hoặc thông báo lỗi `{"error": ...}`).
+   - **Request ID:** Các yêu cầu model được gán `request_id` tăng dần đơn điệu (`"1"`, `"2"`, ...) duy nhất trong phạm vi run, được bảo toàn liên tục kể cả khi resume checkpoint.
+   - **Ghi trực tiếp và liên tục (Live Persistence):** File `conversation.json` được ghi nguyên tử (atomic write qua file tạm) trước và ngay sau mỗi lần gọi model cũng như sau mỗi kết quả tool, giúp phục hồi và chẩn đoán lỗi kể cả khi tiến trình bị ngắt đột ngột. Runner ở bước `finish` tuyệt đối không ghi đè trace bằng mảng state `messages`.
+   - **Giới hạn lượt chạy lịch sử (Historical Run Limitation):** Các lượt chạy trước đây chỉ lưu mảng tin nhắn kết thúc, không ghi lại các yêu cầu tạm thời (ephemeral requests), do đó không thể tái cấu trúc chính xác các yêu cầu model ban đầu từ dữ liệu lịch sử.

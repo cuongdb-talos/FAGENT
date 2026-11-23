@@ -1,0 +1,298 @@
+{
+  "source": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/DRC/ROM_MCELL0.gds",
+  "layer_maps": [
+    "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI/FAGENT/config/layer_mapping"
+  ],
+  "coordinates": "gds_database_units",
+  "database": {
+    "name": "ROM_LAYOUT",
+    "unit": [
+      0.001,
+      1e-09
+    ],
+    "structs": {
+      "ROM_MCELL0": {
+        "width": 220,
+        "height": 400,
+        "coord": [
+          0,
+          0
+        ],
+        "poly": [
+          {
+            "kind": "polygon",
+            "layer": 128,
+            "data_type": 0,
+            "coord": [
+              0,
+              0,
+              220,
+              0,
+              220,
+              400,
+              0,
+              400,
+              0,
+              0
+            ],
+            "id": "ROM_MCELL0:poly:0",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 10,
+            "data_type": 0,
+            "coord": [
+              0,
+              320,
+              220,
+              320,
+              220,
+              400,
+              0,
+              400,
+              0,
+              320
+            ],
+            "id": "ROM_MCELL0:poly:1",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 10,
+            "data_type": 0,
+            "coord": [
+              50,
+              270,
+              170,
+              270,
+              170,
+              368,
+              50,
+              368,
+              50,
+              270
+            ],
+            "id": "ROM_MCELL0:poly:2",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 10,
+            "data_type": 0,
+            "coord": [
+              50,
+              55,
+              170,
+              55,
+              170,
+              210,
+              50,
+              210,
+              50,
+              55
+            ],
+            "id": "ROM_MCELL0:poly:3",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 10,
+            "data_type": 0,
+            "coord": [
+              50,
+              210,
+              170,
+              210,
+              170,
+              270,
+              50,
+              270,
+              50,
+              210
+            ],
+            "id": "ROM_MCELL0:poly:4",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 30,
+            "data_type": 0,
+            "coord": [
+              -90,
+              210,
+              310,
+              210,
+              310,
+              270,
+              -90,
+              270,
+              -90,
+              210
+            ],
+            "id": "ROM_MCELL0:poly:5",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 30,
+            "data_type": 0,
+            "coord": [
+              50,
+              210,
+              170,
+              210,
+              170,
+              270,
+              50,
+              270,
+              50,
+              210
+            ],
+            "id": "ROM_MCELL0:poly:6",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 131,
+            "data_type": 2,
+            "coord": [
+              50,
+              210,
+              170,
+              210,
+              170,
+              270,
+              50,
+              270,
+              50,
+              210
+            ],
+            "id": "ROM_MCELL0:poly:7",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 61,
+            "data_type": 0,
+            "coord": [
+              118,
+              0,
+              218,
+              0,
+              218,
+              400,
+              118,
+              400,
+              118,
+              0
+            ],
+            "id": "ROM_MCELL0:poly:8",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 50,
+            "data_type": 0,
+            "coord": [
+              65,
+              70,
+              155,
+              70,
+              155,
+              160,
+              65,
+              160,
+              65,
+              70
+            ],
+            "id": "ROM_MCELL0:poly:9",
+            "editable": true,
+            "match_status": "matched"
+          },
+          {
+            "kind": "polygon",
+            "layer": 40,
+            "data_type": 0,
+            "coord": [
+              -110,
+              -65,
+              330,
+              -65,
+              330,
+              520,
+              -110,
+              520,
+              -110,
+              -65
+            ],
+            "id": "ROM_MCELL0:poly:10",
+            "editable": true,
+            "match_status": "matched"
+          }
+        ],
+        "path": [],
+        "text": [
+          {
+            "layer": 141,
+            "text_type": 0,
+            "text_presentation": 4,
+            "coord": [
+              110,
+              0
+            ],
+            "text_content": "BL",
+            "angle": 90.0,
+            "mag": 0.05,
+            "is_flip": 0
+          },
+          {
+            "layer": 162,
+            "text_type": 0,
+            "text_presentation": 4,
+            "coord": [
+              0,
+              400
+            ],
+            "text_content": "GND",
+            "angle": 0,
+            "mag": 0.05,
+            "is_flip": 0
+          },
+          {
+            "layer": 63,
+            "text_type": 63,
+            "text_presentation": 4,
+            "coord": [
+              0,
+              240
+            ],
+            "text_content": "WL",
+            "angle": 0,
+            "mag": 0.05,
+            "is_flip": 0
+          }
+        ],
+        "sref": [],
+        "aref": [],
+        "x": [
+          0,
+          220
+        ],
+        "y": [
+          0,
+          400
+        ]
+      }
+    }
+  }
+}

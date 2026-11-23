@@ -48,5 +48,7 @@ class FagentState(TypedDict, total=False):
     checklist_digest: str | None
     checklist_path: str | None
     task_state: dict[str, Any]
+    drc_context: dict[str, Any]
+    report: dict[str, Any]
     failed: bool
     pending_tools: bool

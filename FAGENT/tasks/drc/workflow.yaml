@@ -22,7 +22,7 @@ steps:
   next: repair
 - id: repair
   action: agent
-  next: human_review
+  next: END
   tools:
   - tools:read_gds
   - tools:replace_polygon
@@ -32,10 +32,10 @@ steps:
 # - id: validate
 #   action: steps:validate_drc
 #   next: human_review
-- id: human_review
-  action: review
-  next: END
-  continue: repair
+# - id: human_review
+#   action: review
+#   next: END
+#   continue: repair
 prepare: steps:prepare
 layout_services: true
 #knowledge_review: true

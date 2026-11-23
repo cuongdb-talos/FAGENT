@@ -68,12 +68,13 @@ class CaseLearner:
             else {}
         )
         rules = self.drc_data.get('rules') or [{'name': key, 'description': ''} for key in self.drc_data.get('violations_by_rule', {})]
+        conv_messages = self.extract_conversation_messages(self.conversation_data)
         fingerprint = hashlib.sha256(
             json.dumps(
                 {
                     'path': str(self.rundir),
                     'result': self.result_data,
-                    'conversation': [m for m in self.conversation_data if isinstance(m, dict) and m.get('role') in ('assistant', 'tool')],
+                    'conversation': conv_messages,
                 },
                 sort_keys=True,
             ).encode()
@@ -105,7 +106,7 @@ class CaseLearner:
             'content': json.dumps(
                 {
                     'rules': [r.get('name') for r in rules],
-                    'conversation': [m for m in self.conversation_data if isinstance(m, dict) and m.get('role') in ('assistant', 'tool')],
+                    'conversation': conv_messages,
                 },
                 ensure_ascii=False,
             ),
@@ -115,7 +116,8 @@ class CaseLearner:
             'validation': validation,
             'review': self.review,
         })
-        self.rag = HybridRetriever(self.knowledge_dir, self.config).run()
+        if self.rag is None:
+            self.rag = HybridRetriever(self.knowledge_dir, self.config).run()
         self.stored_ids = self.rag.index_records(self.extracted_records)
         self.knowledge_dir = self.rag.knowledge_dir
         self.learned = True
@@ -147,3 +149,19 @@ class CaseLearner:
         if not path.is_file():
             raise FileNotFoundError(f'Missing required file: {path}')
         return json.loads(path.read_text())
+
+    def extract_conversation_messages(self, data):
+        """Extract ordered assistant and tool messages from legacy lists or version 2 traces."""
+        if isinstance(data, list):
+            return [m for m in data if isinstance(m, dict) and m.get('role') in ('assistant', 'tool')]
+        if isinstance(data, dict) and data.get('version') == 2:
+            extracted = []
+            for event in data.get('events', []):
+                if not isinstance(event, dict):
+                    continue
+                if event.get('type') in ('model_response', 'tool_result'):
+                    msg = event.get('message')
+                    if isinstance(msg, dict) and msg.get('role') in ('assistant', 'tool'):
+                        extracted.append(msg)
+            return extracted
+        return []

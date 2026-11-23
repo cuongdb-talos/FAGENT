@@ -61,7 +61,7 @@ Khi bật `--verbose`, stderr hiển thị thông tin điều hướng theo th�
 ```text
 [Task drc] Starting workflow.
 [Step read] Running workflow action steps:read_drc (node: read)
-[Step read] Completed (node: read). Next node: repair.
+[Step read] Completed (node: read). Next node: plan.
 ```
 
 Lỗi dùng tiền tố `[ERROR]`. Trace chỉ ghi định danh và trạng thái. `conversation.json`, `result.json` và checkpoint SQLite nằm trong rundir. Review có thể tiếp tục, dừng hoặc yêu cầu làm rõ. Chỉ lưu tri thức khi người dùng đồng ý ở lời nhắc riêng.
