@@ -237,6 +237,12 @@ class ConversationTrace:
                 sections.append(f"TOOL RESULT {calls.get(call_id, '')} (id: {call_id})\n{self.format_value(message.get('content', ''))}")
             elif kind == 'model_error':
                 sections.append(f"MODEL ERROR {request_id}\n{event.get('error_type', '')}: {event.get('error_message', '')}")
+            elif kind == 'route_transition':
+                node = event.get('node', '')
+                dest = event.get('destination', '')
+                status_str = 'FAILED' if event.get('failed') else 'OK'
+                ts = event.get('timestamp', '')
+                sections.append(f'ROUTE TRANSITION [{ts}]\n  From: {node} -> To: {dest} (status: {status_str})')
             elif kind in ('operation_start', 'operation_finish'):
                 sections.append(self.format_operation_summary(event))
             else:
