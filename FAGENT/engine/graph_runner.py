@@ -87,6 +87,8 @@ class GraphRunner:
     # Workflow Resume and State Rehydration
     # --------------------------------------------------------------------------
     def resume(self, feedback=PROMPT_FOR_FEEDBACK):
+        if self.checkpointer is None and not (self.rundir / 'graph-checkpoints.sqlite3').is_file():
+            raise ValueError(f'No checkpoint database exists in {self.rundir}')
         self.prepare_graph()
         snapshot = self.graph.get_state(self.graph_config)
         review_ids = {GraphNodes.node_name(step.id) for step in self.services.workflow.steps if step.action == 'review'}
@@ -128,8 +130,12 @@ class GraphRunner:
             feedback = self.read_feedback(state['__interrupt__'][0].value)
             state = self.resume_graph(state, feedback)
         self.result = dict(state.get('result') or {'status': 'incomplete', 'reason': 'No result'})
+        inputs = state.get('inputs') or {}
+        self.result['run_id'] = inputs.get('run_id') or (self.rundir.parent.name if self.rundir.name == 'rundir' else self.thread_id)
+        self.result['thread_id'] = self.thread_id
+        self.result['rundir'] = str(self.rundir)
         self.result['task'] = state.get('identity')
-        self.result['inputs'] = getattr(self.services, 'input_sources', None) or state.get('inputs')
+        self.result['inputs'] = getattr(self.services, 'input_sources', None) or inputs
         if task_state := state.get('task_state'):
             self.result['step_outputs'] = {key: value for key, value in task_state.items() if key not in ('messages', 'result')}
         self.result['candidate_digest'] = state.get('candidate_digest')

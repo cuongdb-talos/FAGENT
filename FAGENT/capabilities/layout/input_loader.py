@@ -64,8 +64,6 @@ class InputLoader(DrcParser):
             'database': self.gds_reader.gds_db,
         }
         self.drc_data = self.read_drc(self.drc_path)
-        if 'rules' in self.drc_data:
-            self.drc_data['rules'] = [rule for rule in self.drc_data['rules'] if rule.get('geometry')]
         self.write_json(self.GDS_OUTPUT, self.gds_data)
         self.write_json(self.DRC_OUTPUT, self.drc_data)
 

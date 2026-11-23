@@ -16,8 +16,8 @@ def test_prepare_reads_gds_and_drc_from_separate_folders(tmp_path):
     library.new_cell(cell)
     library.write_gds(str(gds_dir / f'{cell}.gds'))
     (drc_dir / f'{cell}.drc.results').write_text(
-        f'{cell} 1000\nRULE_A\n0 0 1 Nov 5 12:30:30 2026\nEmpty rule\n'
-        'RULE_B\n1 1 1 Nov 5 12:30:30 2026\nViolation\np 1 3\n0 0\n10 0\n10 10\n'
+        f'{cell} 1000\nRULE_A\n0 2 1 Nov 5 12:30:30 2026\nEmpty rule\n'
+        'RULE_B\n1 2 1 Nov 5 12:30:30 2026\nViolation\np 1 3\n0 0\n10 0\n10 10\n'
     )
     (drc_dir / 'rules.drc').write_text('RULE_A {}\n')
     (tmp_path / 'cells').write_text(cell + '\n')
@@ -32,9 +32,15 @@ def test_prepare_reads_gds_and_drc_from_separate_folders(tmp_path):
 
     rundir, _, inputs = next(Steps().prepare(task, setup, tmp_path, tmp_path / 'output', {}, False))
 
+    assert rundir.parent.parent == tmp_path / 'output' / cell / 'runs'
+    assert rundir.name == 'rundir'
+    assert inputs['run_id'] == rundir.parent.name
     assert Path(inputs['gds']) == gds_dir / f'{cell}.gds'
     report = json.loads((rundir / 'drc.json').read_text())
     assert report['source'] == str(drc_dir / f'{cell}.drc.results')
-    assert [rule['name'] for rule in report['rules']] == ['RULE_B']
-    assert report['total_violations'] == 1
+    assert [rule['name'] for rule in report['rules']] == ['RULE_A', 'RULE_B']
+    assert [rule['total_count'] for rule in report['rules']] == [2, 2]
+    assert [len(rule['geometry']) for rule in report['rules']] == [0, 1]
+    assert report['total_violations'] == 4
     assert json.loads((rundir / 'gds.json').read_text())['source'] == str(gds_dir / f'{cell}.gds')
+    assert (existing / 'result.json').read_text() == 'stale output'
