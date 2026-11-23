@@ -9,6 +9,8 @@ from pathlib import Path
 
 import gdstk
 
+from .polygon_ids import PolygonIds
+
 
 # ==============================================================================
 # SECTION 2: GDS Layout Manipulation Service Class
@@ -38,6 +40,7 @@ class LayoutService:
             raise FileNotFoundError(f'GDS source not found: {self.gds_path}')
         self.candidate = self.rundir / 'candidate.gds'
         self.library = None
+        self.polygon_ids = None
         self.dirty = False
         self.last_validation = None
         self.drc_log = None
@@ -55,6 +58,7 @@ class LayoutService:
         self.gds_path = None
         self.candidate = None
         self.library = None
+        self.polygon_ids = None
         self.dirty = False
         self.last_validation = None
         self.drc_log = None
@@ -80,36 +84,52 @@ class LayoutService:
 
     def read_gds(self, cell_name):
         cell = self.get_cell(cell_name)
-        return {'cell': cell_name, 'polygons': [
-            {'index': i, 'layer': p.layer, 'datatype': p.datatype, 'points': p.points.tolist()}
-            for i, p in enumerate(cell.polygons)], 'references': len(cell.references),
-            'paths': len(cell.paths)}
+        return {
+            'cell': cell_name,
+            'polygons': [
+                {
+                    'id': self.polygon_ids.id_for(cell_name, p),
+                    'kind': 'polygon',
+                    'editable': True,
+                    'layer': p.layer,
+                    'datatype': p.datatype,
+                    'points': p.points.tolist(),
+                }
+                for p in cell.polygons
+            ],
+            'references': [
+                {'kind': 'reference', 'editable': False, 'cell': ref.cell_name}
+                for ref in cell.references
+            ],
+            'paths': [
+                {'kind': 'path', 'editable': False, 'layers': list(path.layers), 'datatypes': list(path.datatypes)}
+                for path in cell.paths
+            ],
+        }
 
     # --------------------------------------------------------------------------
     # Polygon Editing and Geometry Mutation
     # --------------------------------------------------------------------------
-    def replace_polygon(self, cell_name, polygon_index, points):
+    def replace_polygon(self, cell_name, polygon_id, points):
         cell = self.get_cell(cell_name)
-        old = self._get_polygon(cell, polygon_index)
+        old = self._get_polygon(cell_name, polygon_id)
         self._validate_points(points)
         new = self._create_polygon(points, old.layer, old.datatype)
         cell.remove(old)
         cell.add(new)
+        self.polygon_ids.rebind(cell_name, polygon_id, old, new)
         self.dirty = True
         self.last_validation = None
         return {
             'status': 'modified',
             'cell': cell_name,
-            'old_index': polygon_index,
-            'new_index': len(cell.polygons) - 1,
+            'polygon_id': polygon_id,
             'layer': old.layer,
             'datatype': old.datatype,
         }
 
-    def _get_polygon(self, cell, polygon_index):
-        if isinstance(polygon_index, bool) or not isinstance(polygon_index, int) or not 0 <= polygon_index < len(cell.polygons):
-            raise ValueError('Invalid polygon index')
-        old = cell.polygons[polygon_index]
+    def _get_polygon(self, cell_name, polygon_id):
+        old = self.polygon_ids.resolve(cell_name, polygon_id)
         if old.properties:
             raise ValueError('Cannot replace polygon with GDS properties')
         return old
@@ -160,8 +180,7 @@ class LayoutService:
 
     def load_library(self):
         if self.library is None:
-            try:
-                import gdstk
-            except ImportError as exc:
-                raise RuntimeError('Install gdstk to inspect or edit GDS geometry') from exc
             self.library = gdstk.read_gds(str(self.gds_path))
+            self.polygon_ids = PolygonIds(self.library).run()
+        elif self.polygon_ids is None:
+            self.polygon_ids = PolygonIds(self.library).run()

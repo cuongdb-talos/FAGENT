@@ -11,6 +11,7 @@ from pathlib import Path
 import gdstk
 
 from ..capabilities.layout.layout_service import LayoutService
+from ..capabilities.layout.polygon_ids import PolygonIds
 from ..integrations.eda_tools.drc_runner import DrcRunner
 from ..integrations.eda_tools.lvs_runner import LvsRunner
 from ..integrations.models.llama_adapter import LlamaAdapter
@@ -178,17 +179,25 @@ class GraphServices:
         return self.drc_context(self.layout.read_drc())
 
     def checkpoint_candidate(self):
-        return self.layout.save_gds()['candidate']
+        candidate = self.layout.save_gds()['candidate']
+        digest = self.candidate_digest(Path(candidate))
+        if self.layout.polygon_ids is None:
+            raise ValueError('Polygon IDs are not initialized for candidate checkpoint')
+        self.layout.polygon_ids.save(self.rundir / 'polygon_ids.json', digest)
+        return candidate
 
     def validate_drc(self, candidate):
         return DrcRunner(self.layout, candidate, self.workflow.backend).run()
 
-    def restore_candidate(self, path, validation):
+    def restore_candidate(self, path, validation, expected_digest=None):
         candidate = Path(path).resolve()
         if candidate != self.layout.candidate.resolve() or not candidate.is_file():
             raise ValueError('Invalid checkpoint candidate path')
         self.check_output_path(candidate)
-        self.layout.library = gdstk.read_gds(str(candidate))
+        digest = expected_digest or self.candidate_digest(candidate)
+        library = gdstk.read_gds(str(candidate))
+        self.layout.polygon_ids = PolygonIds().restore(self.rundir / 'polygon_ids.json', library, digest)
+        self.layout.library = library
         self.layout.dirty = True
         self.layout.last_validation = validation
 

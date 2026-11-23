@@ -20,12 +20,12 @@ class DrcTools:
     def __init__(self):
         """Initialize stateless tool handlers."""
 
-    def replace(context, cell_name, polygon_index, points):
+    def replace(context, cell_name, polygon_id, points):
         """Require inspection, then save and fingerprint a modified candidate."""
         if cell_name not in context.state.get("inspected", []):
             raise ValueError("Inspect the target cell before editing")
         layout = context.services.layout
-        result = layout.replace_polygon(cell_name=cell_name, polygon_index=polygon_index, points=points)
+        result = layout.replace_polygon(cell_name=cell_name, polygon_id=polygon_id, points=points)
         if result.get("status") != "modified":
             return result
         try:
@@ -56,12 +56,12 @@ read_gds.task_tool = ToolSpec(
 replace_polygon = DrcTools.replace
 replace_polygon.task_tool = ToolSpec(
     function=replace_polygon,
-    description="Replace one direct polygon in GDS user units. Convert DBU coordinates using dbu_per_user_unit.",
+    description="Replace one direct polygon by stable polygon_id in GDS user units. Convert DBU coordinates using dbu_per_user_unit.",
     parameters={
         "type": "object",
         "properties": {
             "cell_name": {"type": "string"},
-            "polygon_index": {"type": "integer"},
+            "polygon_id": {"type": "string"},
             "points": {
                 "type": "array",
                 "minItems": 3,
@@ -73,7 +73,7 @@ replace_polygon.task_tool = ToolSpec(
                 },
             },
         },
-        "required": ["cell_name", "polygon_index", "points"],
+        "required": ["cell_name", "polygon_id", "points"],
         "additionalProperties": False,
     },
 )

@@ -116,7 +116,7 @@ class GraphRunner:
             raise ValueError('Checkpoint workflow identity does not match the selected workflow')
         self.verify_candidate(state)
         if candidate := state.get('candidate_path'):
-            self.services.restore_candidate(candidate, state.get('validation'))
+            self.services.restore_candidate(candidate, state.get('validation'), state.get('candidate_digest'))
         return self.graph.invoke(
             Command(resume=feedback if feedback is not None else {'feedback': None}),
             self.graph_config,

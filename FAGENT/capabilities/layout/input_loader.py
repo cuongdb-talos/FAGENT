@@ -1,15 +1,18 @@
 """Input layout and Calibre DRC report ingestion, validation, and JSON normalization."""
 
 # ==============================================================================
-# SECTION 1: Standard Library Imports
+# SECTION 1: Standard and Third-Party Library Imports
 # ==============================================================================
 import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+import gdstk
+
 # ==============================================================================
 # SECTION 2: Internal FAGENT Module Imports
 # ==============================================================================
+from .polygon_ids import PolygonIds
 from .process_gds import ProcessGDS
 from ..drc.drc_parser import DrcParser
 
@@ -57,6 +60,8 @@ class InputLoader(DrcParser):
             print(f"  * Parsing Calibre DRC database: {self.drc_path.name}")
 
         self.gds_reader = ProcessGDS(str(self.gds_path), self.layer_map_files).run()
+        gds_library = gdstk.read_gds(str(self.gds_path))
+        PolygonIds(gds_library).run().annotate_gds_db(self.gds_reader.gds_db)
         self.gds_data = {
             'source': str(self.gds_path),
             'layer_maps': [str(Path(path).resolve()) for path in self.layer_map_files or ()],

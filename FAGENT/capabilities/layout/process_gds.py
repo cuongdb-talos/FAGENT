@@ -137,6 +137,7 @@ class ProcessGDS:
                                 
                             self.gds_db["structs"][struct_name]["poly"].append(
                                 {
+                                    "kind": "poly",
                                     "layer": layer,
                                     "data_type": data_type,
                                     "coord": coord,
@@ -145,6 +146,7 @@ class ProcessGDS:
                         else:
                             self.gds_db["structs"][struct_name]["poly"].append(
                                 {
+                                    "kind": "poly",
                                     "layer": layer,
                                     "data_type": data_type,
                                     "coord": coord,
@@ -153,6 +155,8 @@ class ProcessGDS:
                     elif ele_type == "path":
                         self.gds_db["structs"][struct_name]["poly"].append(
                             {
+                                "kind": "path",
+                                "editable": False,
                                 "layer": layer,
                                 "data_type": data_type,
                                 "coord": self.convert_path_to_poly(coord, width, path_type, bgnextn, endextn)
