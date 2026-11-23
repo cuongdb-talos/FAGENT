@@ -8,6 +8,7 @@ from pathlib import Path
 from FAGENT.capabilities.layout.input_loader import InputLoader
 from FAGENT.engine.conversation_trace import ConversationTrace
 from FAGENT.engine.graph_services import GraphServices
+from FAGENT.tasks.drc.checklist import Checklist
 
 
 # === SECTION 2: Steps ===
@@ -40,7 +41,28 @@ class Steps:
             updated_messages = [{'role': 'system', 'content': sys_content}, *current_messages]
 
         updated_messages.append({'role': 'user', 'content': json.dumps({'drc_context': drc_context})})
-        return {'report': context.services.drc_report, 'drc_context': drc_context, 'messages': updated_messages}
+
+        # Initialize deterministic checklist from report
+        report = context.services.drc_report
+        checklist = Checklist().run(report=report, proposed_tasks=None, goal=goal)
+        snapshot = checklist.read()
+        checklist_path = None
+        if hasattr(context.services, 'rundir') and context.services.rundir:
+            checklist_path = Path(context.services.rundir) / 'checklist.json'
+            if hasattr(context.services, 'check_output_path'):
+                context.services.check_output_path(checklist_path)
+            checklist.save(checklist_path)
+
+        result = {
+            'report': report,
+            'drc_context': drc_context,
+            'messages': updated_messages,
+            'checklist': snapshot,
+            'checklist_digest': snapshot['digest'],
+        }
+        if checklist_path:
+            result['checklist_path'] = str(checklist_path)
+        return result
 
     def validate_drc(self, context):
         candidate = context.state.get('candidate_path')

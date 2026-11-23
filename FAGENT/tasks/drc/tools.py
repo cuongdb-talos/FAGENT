@@ -1,6 +1,7 @@
 """Expose layout inspection and repair with explicit candidate evidence."""
 
 # === SECTION 1: Imports ===
+import copy
 from pathlib import Path
 
 from FAGENT.capabilities.layout.cover_check import CoverCheck
@@ -78,6 +79,56 @@ class DrcTools:
         checklist = Checklist.from_dict(raw)
         return ToolResult(checklist.read(), {})
 
+    def get_violation(context, task_id):
+        """Lookup source DRC violation record, marker coordinates, task state, and candidate identity."""
+        raw = context.state.get("checklist")
+        if not raw:
+            raise ValueError("Checklist has not been initialized for this run")
+        checklist = Checklist.from_dict(raw)
+        task = next((t for t in checklist.tasks if t.get("task_id") == task_id), None)
+        if task is None:
+            raise ValueError(f"Unknown checklist task_id: {task_id}")
+
+        report = context.state.get("report")
+        if not report and hasattr(context.services, "drc_report"):
+            report = context.services.drc_report
+        if not report and context.state.get("drc_context"):
+            report = context.state["drc_context"].get("drc")
+        if not report:
+            raise ValueError("DRC report data is unavailable in context")
+
+        rule_name = task.get("rule")
+        vid = task.get("violation_id")
+        occ = task.get("occurrence", 0)
+
+        matched_geom = None
+        for r in report.get("rules", []):
+            if r.get("name") == rule_name:
+                current_occ = 0
+                for g in r.get("geometry", []):
+                    if g.get("id") == vid:
+                        if current_occ == occ:
+                            matched_geom = g
+                            break
+                        current_occ += 1
+                if matched_geom is not None:
+                    break
+
+        candidate_path = context.state.get("candidate_path")
+        candidate_digest = context.state.get("candidate_digest")
+
+        payload = {
+            "task": copy.deepcopy(task),
+            "violation": copy.deepcopy(matched_geom) if matched_geom else None,
+            "rule": rule_name,
+            "owning_cell": report.get("top_cell"),
+            "dbu_per_user_unit": report.get("dbu_per_user_unit"),
+            "source": report.get("source"),
+            "candidate_path": candidate_path,
+            "candidate_digest": candidate_digest,
+        }
+        return ToolResult(payload, {})
+
     def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
         """Update one existing checklist task and persist the updated checklist atomically."""
         raw = context.state.get("checklist")
@@ -108,6 +159,7 @@ class DrcTools:
     replace = staticmethod(replace)
     check_cover = staticmethod(check_cover)
     read_checklist = staticmethod(read_checklist)
+    get_violation = staticmethod(get_violation)
     update_checklist = staticmethod(update_checklist)
 
 
@@ -172,6 +224,20 @@ read_checklist.task_tool = ToolSpec(
     parameters={
         "type": "object",
         "properties": {},
+        "additionalProperties": False,
+    },
+)
+
+get_violation = DrcTools.get_violation
+get_violation.task_tool = ToolSpec(
+    function=get_violation,
+    description="Lookup source DRC violation record, marker coordinates, task state, and candidate identity.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+        },
+        "required": ["task_id"],
         "additionalProperties": False,
     },
 )

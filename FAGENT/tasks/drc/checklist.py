@@ -24,15 +24,43 @@ class Checklist:
     # Main Execution Entry Point
     # --------------------------------------------------------------------------
     def run(self, report: dict = None, proposed_tasks: list = None, goal: str = '') -> 'Checklist':
-        """Reconcile report violations against proposed_tasks and build the initial checklist."""
+        """Reconcile report violations against proposed_tasks or build deterministic report items."""
         if report is None:
             raise ValueError('DRC report must be provided')
-        if proposed_tasks is None:
-            proposed_tasks = []
-        if not isinstance(proposed_tasks, list):
+        if proposed_tasks is not None and not isinstance(proposed_tasks, list):
             raise ValueError('proposed_tasks must be a list')
 
         expected_items = self._extract_report_items(report)
+        if proposed_tasks is None:
+            tasks = []
+            for idx, item in enumerate(expected_items, start=1):
+                if item['missing_geometry']:
+                    status = 'unresolved'
+                    reason = item.get('missing_reason', 'Missing geometry in report')
+                    work = f'Investigate missing geometry for {item["rule"]}'
+                elif self._skip_allowed(item['rule'], '', goal):
+                    status = 'skipped'
+                    reason = f'Excluded by goal: {goal}'
+                    work = ''
+                else:
+                    status = 'pending'
+                    reason = ''
+                    work = ''
+                tasks.append({
+                    'task_id': f'task-{idx}',
+                    'rule': item['rule'],
+                    'violation_id': item['violation_id'],
+                    'occurrence': item['occurrence'],
+                    'work': work,
+                    'status': status,
+                    'reason': reason,
+                    'polygon_ids': [],
+                    'evidence': [],
+                    'stale': False,
+                })
+            self.tasks = tasks
+            return self
+
         reconciled = self._reconcile(expected_items, proposed_tasks, goal)
         tasks = []
         for idx, item in enumerate(reconciled, start=1):
@@ -338,8 +366,8 @@ class Checklist:
         return None
 
     def _skip_allowed(self, rule: str, reason: str, goal: str) -> bool:
-        """Allow skipping only when both reason and configured goal authorize the skipped category."""
-        if not reason.strip() or not isinstance(goal, str) or not goal.strip():
+        """Allow skipping only when configured goal authorizes the skipped category."""
+        if not isinstance(goal, str) or not goal.strip():
             return False
         goal_lower = goal.lower()
         if not any(kw in goal_lower for kw in self.SKIP_KEYWORDS):
@@ -347,5 +375,5 @@ class Checklist:
         exclusion_terms = set(re.findall(r'[a-z0-9_]+', goal_lower)) - set(self.SKIP_KEYWORDS) - {
             'all', 'drc', 'errors', 'error', 'about', 'only', 'the', 'but', 'and', 'or', 'fix', 'rules', 'rule', 'of', 'for',
         }
-        target_text = f'{rule} {reason}'.lower()
+        target_text = f'{rule} {reason}'.lower().strip()
         return any(term in target_text for term in exclusion_terms if len(term) >= 3)
