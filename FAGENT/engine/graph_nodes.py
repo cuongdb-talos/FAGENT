@@ -144,7 +144,7 @@ class GraphNodes:
         self.services.check_output_path(checklist_path)
         checklist.save(checklist_path)
         return {
-            'messages': [*plan_request, message],
+            'messages': [*messages, message],
             'checklist': snapshot,
             'checklist_digest': snapshot['digest'],
             'checklist_path': str(checklist_path),
@@ -161,7 +161,18 @@ class GraphNodes:
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
         messages = list(state.get('messages', []))
         request_messages = list(messages)
-        if state.get('checklist') is not None:
+        if self.services.workflow and getattr(self.services.workflow, 'task', None) == 'drc':
+            repair_instruction = self.services.repair_prompt()
+            agent_payload = {'repair_instruction': repair_instruction}
+            if state.get('checklist') is not None:
+                goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
+                agent_payload['current_checklist'] = state['checklist']
+                agent_payload['goal'] = goal
+            request_messages.append({
+                'role': 'user',
+                'content': json.dumps(agent_payload),
+            })
+        elif state.get('checklist') is not None:
             goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
             request_messages.append({
                 'role': 'user',
@@ -172,7 +183,7 @@ class GraphNodes:
             [spec.model_spec(name) for name, spec in step.tools.items()],
             response_schema=getattr(step, 'schema', None),
         )
-        self.last_conversation = [*messages, message]
+        self.last_conversation = [*request_messages, message]
         calls = message.get('tool_calls')
         updates = {'messages': [*messages, message], 'iteration': iteration + 1, 'pending_tools': bool(calls)}
         if not calls:

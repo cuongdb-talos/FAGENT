@@ -118,6 +118,47 @@ class GraphServices:
             texts.append(self.workflow.protocol_text)
         return '\n\n'.join(texts)
 
+    def drc_system_prompt(self, goal=None, constraints=None):
+        """Construct system message consisting only of configured goal and constraints."""
+        cfg = getattr(self, 'config', {}) or {}
+        if goal is None:
+            goal = cfg.get('goal', '')
+        if constraints is None:
+            path_str = cfg.get('constraints_file')
+            path = Path(path_str) if path_str else Path(__file__).resolve().parents[1] / 'knowledge' / 'constraints.json'
+            if path.is_file():
+                try:
+                    loaded = json.loads(path.read_text(encoding='utf-8'))
+                    if isinstance(loaded, list):
+                        constraints = loaded
+                    else:
+                        constraints = []
+                except Exception:
+                    constraints = []
+            else:
+                constraints = []
+        parts = []
+        if goal and str(goal).strip():
+            parts.append(str(goal).strip())
+        if constraints:
+            cleaned = [str(c).strip() for c in constraints if str(c).strip()]
+            if cleaned:
+                parts.append('Constraints:\n' + '\n'.join(f'- {item}' for item in cleaned))
+        return '\n\n'.join(parts).strip()
+
+    def repair_prompt(self):
+        """Build node-local instruction for DRC repair agent."""
+        texts = []
+        wf = getattr(self, 'workflow', None)
+        if wf and getattr(wf, 'prompt_text', None):
+            texts.extend(wf.prompt_text)
+        custom = getattr(self, 'custom_prompt', None)
+        if custom:
+            texts.append(custom.strip())
+        if wf and getattr(wf, 'protocol_text', None):
+            texts.append(wf.protocol_text.strip())
+        return '\n\n'.join(texts).strip()
+
     # --------------------------------------------------------------------------
     # Environment and Subsystem Preparation
     # --------------------------------------------------------------------------
@@ -164,7 +205,10 @@ class GraphServices:
                         outputs={'input_sources': self.input_sources},
                     )
                 return self.messages
-            self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
+            if self.workflow.task == 'drc':
+                self.messages = [{'role': 'system', 'content': self.drc_system_prompt()}]
+            else:
+                self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
             if op_id and hasattr(self, 'conversation_trace') and self.conversation_trace:
                 self.conversation_trace.finish_operation(
                     op_id,

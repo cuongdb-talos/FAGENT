@@ -29,8 +29,18 @@ class Steps:
 
     def read_drc(self, context):
         drc_context = context.services.build_drc_context()
-        return {'report': context.services.drc_report, 'drc_context': drc_context,
-                'messages': self.append_context(context.state, {'drc_context': drc_context})}
+        goal = context.services.config.get('goal', '') if hasattr(context.services, 'config') else ''
+        constraints = drc_context.get('knowledge', {}).get('constraints', [])
+        sys_content = context.services.drc_system_prompt(goal=goal, constraints=constraints)
+
+        current_messages = list(context.state.get('messages', []))
+        if current_messages and current_messages[0].get('role') == 'system':
+            updated_messages = [{'role': 'system', 'content': sys_content}, *current_messages[1:]]
+        else:
+            updated_messages = [{'role': 'system', 'content': sys_content}, *current_messages]
+
+        updated_messages.append({'role': 'user', 'content': json.dumps({'drc_context': drc_context})})
+        return {'report': context.services.drc_report, 'drc_context': drc_context, 'messages': updated_messages}
 
     def validate_drc(self, context):
         candidate = context.state.get('candidate_path')
