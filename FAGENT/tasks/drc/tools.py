@@ -5,6 +5,7 @@ import copy
 from pathlib import Path
 
 from FAGENT.capabilities.layout.cover_check import CoverCheck
+from FAGENT.capabilities.layout.repair_proposals import RepairProposals
 from FAGENT.capabilities.layout.violation_geometry import ViolationGeometry
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
@@ -88,7 +89,10 @@ class DrcTools:
         layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
         references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
 
-        evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        if not deck_paths:
+            evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
         return ToolResult(evidence, {})
 
     def find_related_polygons(context, task_id, search_margin_dbu=0):
@@ -103,7 +107,10 @@ class DrcTools:
         layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
         references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
 
-        rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        if not deck_paths:
+            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
         geom_result = ViolationGeometry().run(
             task=task,
             rule_evidence=rule_evidence,
@@ -112,6 +119,68 @@ class DrcTools:
             search_margin_dbu=search_margin_dbu,
         )
         return ToolResult(geom_result, {})
+
+    def measure_violation(context, task_id, polygon_ids=None):
+        """Measure geometric enclosure or distance for a specific violation task."""
+        v_result = DrcTools.get_violation(context, task_id)
+        task = v_result.payload.get("task") or {}
+        task["violation"] = v_result.payload.get("violation")
+        task["owning_cell"] = v_result.payload.get("owning_cell")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        if not deck_paths:
+            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        geom_result = ViolationGeometry().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        proposals_result = RepairProposals().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            geometry=geom_result,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        return ToolResult(proposals_result["measurement"], {})
+
+    def propose_polygon_fix(context, task_id, polygon_ids=None):
+        """Generate deterministic repair proposals for a measured violation."""
+        v_result = DrcTools.get_violation(context, task_id)
+        task = v_result.payload.get("task") or {}
+        task["violation"] = v_result.payload.get("violation")
+        task["owning_cell"] = v_result.payload.get("owning_cell")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        if not deck_paths:
+            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        geom_result = ViolationGeometry().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        proposals_result = RepairProposals().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            geometry=geom_result,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        return ToolResult({"task_id": task_id, "proposals": proposals_result["proposals"]}, {})
 
     def read_checklist(context):
         """Return the current run-scoped violation checklist."""
@@ -186,7 +255,10 @@ class DrcTools:
         layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
         references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
 
-        evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        if not deck_paths:
+            evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
         return ToolResult(evidence, {})
 
     def find_related_polygons(context, task_id, search_margin_dbu=0):
@@ -201,7 +273,10 @@ class DrcTools:
         layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
         references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
 
-        rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        if not deck_paths:
+            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
         geom_result = ViolationGeometry().run(
             task=task,
             rule_evidence=rule_evidence,
@@ -210,6 +285,68 @@ class DrcTools:
             search_margin_dbu=search_margin_dbu,
         )
         return ToolResult(geom_result, {})
+
+    def measure_violation(context, task_id, polygon_ids=None):
+        """Measure geometric enclosure or distance for a specific violation task."""
+        v_result = DrcTools.get_violation(context, task_id)
+        task = v_result.payload.get("task") or {}
+        task["violation"] = v_result.payload.get("violation")
+        task["owning_cell"] = v_result.payload.get("owning_cell")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        if not deck_paths:
+            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        geom_result = ViolationGeometry().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        proposals_result = RepairProposals().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            geometry=geom_result,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        return ToolResult(proposals_result["measurement"], {})
+
+    def propose_polygon_fix(context, task_id, polygon_ids=None):
+        """Generate deterministic repair proposals for a measured violation."""
+        v_result = DrcTools.get_violation(context, task_id)
+        task = v_result.payload.get("task") or {}
+        task["violation"] = v_result.payload.get("violation")
+        task["owning_cell"] = v_result.payload.get("owning_cell")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        if not deck_paths:
+            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
+        else:
+            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        geom_result = ViolationGeometry().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        proposals_result = RepairProposals().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            geometry=geom_result,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+        )
+        return ToolResult({"task_id": task_id, "proposals": proposals_result["proposals"]}, {})
 
     def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
         """Update one existing checklist task and persist the updated checklist atomically."""
@@ -244,6 +381,8 @@ class DrcTools:
     get_violation = staticmethod(get_violation)
     find_rule = staticmethod(find_rule)
     find_related_polygons = staticmethod(find_related_polygons)
+    measure_violation = staticmethod(measure_violation)
+    propose_polygon_fix = staticmethod(propose_polygon_fix)
     update_checklist = staticmethod(update_checklist)
 
 
@@ -347,6 +486,36 @@ find_related_polygons.task_tool = ToolSpec(
         "properties": {
             "task_id": {"type": "string"},
             "search_margin_dbu": {"type": "number"},
+        },
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+measure_violation = DrcTools.measure_violation
+measure_violation.task_tool = ToolSpec(
+    function=measure_violation,
+    description="Measure geometric enclosure or distances for a violation task against physical layout polygons.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "polygon_ids": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+propose_polygon_fix = DrcTools.propose_polygon_fix
+propose_polygon_fix.task_tool = ToolSpec(
+    function=propose_polygon_fix,
+    description="Propose deterministic geometry edits with before/after coordinates to repair a measured violation.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "polygon_ids": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["task_id"],
         "additionalProperties": False,
