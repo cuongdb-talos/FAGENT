@@ -207,3 +207,87 @@ def test_routing_functional():
     assert nodes.route_task_step({'failed': False, 'review': {'decision': 'stop'}}, step_review) == END
     assert nodes.route_task_step({'failed': False, 'review': {'decision': 'continue'}}, step_review) == 'repair'
     assert nodes.route_task_step({'failed': False, 'review': {'decision': 'unclear'}}, step_review) == 'human_review'
+
+
+def test_execute_plan_partial_model_plan_and_negative_cases(tmp_path):
+    rundir = tmp_path / 'rundir'
+    rundir.mkdir(parents=True)
+    schema_path = Path('FAGENT/tasks/drc/schemas/plan.json')
+    schema = json.loads(schema_path.read_text())
+
+    # Partial model plan: covers only violation 1 of 2
+    plan_content = {
+        'summary': 'Planned partial task',
+        'tasks': [
+            {'rule': 'R_EN', 'violation_id': 1, 'occurrence': 0, 'work': 'Fix enclosure 1', 'status': 'pending', 'reason': ''}
+        ],
+    }
+
+    class _MockServices:
+        def __init__(self, rundir, plan_dict=None, error=None):
+            self.rundir = rundir
+            self.config = {'goal': 'Fix DRC'}
+            self.workflow = SimpleNamespace(response_schema=schema)
+            self.plan_dict = plan_dict
+            self.error = error
+
+        def chat(self, messages, specs, response_schema=None):
+            if self.error:
+                raise self.error
+            return {'role': 'assistant', 'content': json.dumps(self.plan_dict)}
+
+        def check_output_path(self, path):
+            return path
+
+    services = _MockServices(rundir, plan_dict=plan_content)
+    nodes = GraphNodes(services)
+
+    step = SimpleNamespace(id='plan', action='plan', prompt='Plan prompt', schema=schema, next='repair')
+    context = TaskContext(
+        task='drc',
+        inputs={},
+        state={
+            'messages': [],
+            'report': {
+                'rules': [
+                    {'name': 'R_EN', 'total_count': 2, 'geometry': [{'id': 1}, {'id': 2}]}
+                ]
+            },
+        },
+        services=services,
+    )
+
+    updates = nodes.execute_plan(context, step)
+    assert 'checklist' in updates
+    checklist = updates['checklist']
+    tasks = checklist['tasks']
+    assert len(tasks) == 2
+    assert tasks[0]['status'] == 'pending'
+    assert tasks[0]['violation_id'] == 1
+    assert tasks[1]['status'] == 'unresolved'
+    assert tasks[1]['violation_id'] == 2
+    assert tasks[1]['reason'] != ''
+
+    # Routing proceeds to repair
+    assert nodes.route_task_step({'failed': False}, step) == 'repair'
+
+    # Summary correctly indicates incomplete / unresolved
+    assert checklist['summary']['counts']['pending'] == 1
+    assert checklist['summary']['counts']['unresolved'] == 1
+    assert checklist['summary']['all_resolved'] is False
+
+    # Checkpoint digest and persistence
+    assert updates['checklist_digest'] == checklist['digest']
+    assert (rundir / 'checklist.json').exists()
+
+    # Negative case 1: Schema-invalid response from model fails closed
+    invalid_schema_services = _MockServices(rundir, plan_dict={'tasks': []})  # missing 'summary'
+    nodes_invalid_schema = GraphNodes(invalid_schema_services)
+    with pytest.raises(jsonschema.ValidationError):
+        nodes_invalid_schema.execute_plan(context, step)
+
+    # Negative case 2: Model exception propagates fail-fast
+    error_services = _MockServices(rundir, error=RuntimeError('Model inference failed'))
+    nodes_error = GraphNodes(error_services)
+    with pytest.raises(RuntimeError, match='Model inference failed'):
+        nodes_error.execute_plan(context, step)
