@@ -39,7 +39,10 @@ class GraphBuilder:
                 tool_node = f'{step.id}--tools'
                 routes.extend((node, tool_node))
                 graph.add_node(tool_node, partial(nodes.run_task_step, step=step, tools=True))
-                graph.add_conditional_edges(tool_node, partial(nodes.route_task_tools, step=step), [END, node])
+                tool_routes = [END, node]
+                if any(s.id == 'plan' for s in steps):
+                    tool_routes.append(nodes.node_name('plan'))
+                graph.add_conditional_edges(tool_node, partial(nodes.route_task_tools, step=step), list(dict.fromkeys(tool_routes)))
             graph.add_conditional_edges(node, partial(nodes.route_task_step, step=step), list(dict.fromkeys(routes)))
         graph.add_edge(START, nodes.node_name(steps[0].id))
         self.graph = graph.compile(checkpointer=self.checkpointer)

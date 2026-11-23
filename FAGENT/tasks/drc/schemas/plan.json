@@ -4,51 +4,25 @@
     "summary": {
       "type": "string"
     },
-    "tasks": {
+    "steps": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "rule": {
+          "tool": {
             "type": "string"
           },
-          "violation_id": {
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "occurrence": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "work": {
+          "purpose": {
             "type": "string"
           },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "skipped",
-              "unresolved"
-            ]
-          },
-          "reason": {
+          "task_id": {
             "type": "string"
-          },
-          "polygon_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         },
         "required": [
-          "rule",
-          "violation_id",
-          "work",
-          "status",
-          "reason"
+          "tool",
+          "purpose",
+          "task_id"
         ],
         "additionalProperties": false
       }
@@ -56,7 +30,7 @@
   },
   "required": [
     "summary",
-    "tasks"
+    "steps"
   ],
   "additionalProperties": false
 }

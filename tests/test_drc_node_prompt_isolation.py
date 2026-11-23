@@ -73,7 +73,7 @@ class TestDrcNodePromptIsolation:
             retrieve=Mock(return_value=[{'id': 'rec-1', 'rule': 'CT_R_11', 'content': 'Keep contact spacing >= 10'}])
         )
 
-        plan_obj = {'summary': 'Fix CT_R_11', 'tasks': [{'rule': 'CT_R_11', 'violation_id': 1, 'work': 'inspect', 'status': 'pending', 'reason': ''}]}
+        plan_obj = {'summary': 'Fix CT_R_11', 'steps': [{'tool': 'read_gds', 'purpose': 'inspect', 'task_id': 'task-1'}]}
         resp_plan = {'role': 'assistant', 'content': json.dumps(plan_obj)}
         resp_call_tool = {
             'role': 'assistant',
@@ -160,7 +160,7 @@ class TestDrcNodePromptIsolation:
         services.layout = SimpleNamespace(read_drc=Mock(return_value=report), gds_data={'source': 'l.gds'}, check_output_path=Mock())
         services.rag = SimpleNamespace(retrieve=Mock(return_value=[]))
 
-        resp_plan = {'role': 'assistant', 'content': json.dumps({'summary': 's', 'tasks': [{'rule': 'R1', 'violation_id': 1, 'work': 'w', 'status': 'pending', 'reason': ''}]})}
+        resp_plan = {'role': 'assistant', 'content': json.dumps({'summary': 's', 'steps': [{'tool': 'read_gds', 'purpose': 'w', 'task_id': 'task-1'}]})}
         resp_final = {'role': 'assistant', 'content': json.dumps({'decision': 'stop', 'status': 'incomplete', 'reason': 'r', 'violations_analysis': [], 'recommendations': ''})}
         mock_client = MockChatClient([resp_plan, resp_final])
         services.client = mock_client
@@ -200,7 +200,7 @@ class TestDrcNodePromptIsolation:
         services.layout = SimpleNamespace(read_drc=Mock(return_value=report), gds_data={'source': 'l.gds'}, check_output_path=Mock())
         services.rag = SimpleNamespace(retrieve=Mock(return_value=[]))
 
-        resp_plan = {'role': 'assistant', 'content': json.dumps({'summary': 's', 'tasks': [{'rule': 'R1', 'violation_id': 1, 'work': 'w', 'status': 'pending', 'reason': ''}]})}
+        resp_plan = {'role': 'assistant', 'content': json.dumps({'summary': 's', 'steps': [{'tool': 'read_gds', 'purpose': 'w', 'task_id': 'task-1'}]})}
         resp_final = {'role': 'assistant', 'content': json.dumps({'decision': 'stop', 'status': 'incomplete', 'reason': 'r', 'violations_analysis': [], 'recommendations': ''})}
         mock_client = MockChatClient([resp_plan, resp_final])
         services.client = mock_client
@@ -240,7 +240,7 @@ class TestDrcNodePromptIsolation:
         services.layout = SimpleNamespace(read_drc=Mock(return_value=report), gds_data={'source': 'l.gds'}, check_output_path=Mock())
         services.rag = SimpleNamespace(retrieve=Mock(return_value=[]))
 
-        plan_obj = {'summary': 's', 'tasks': [{'rule': 'R1', 'violation_id': 1, 'work': 'w', 'status': 'pending', 'reason': ''}]}
+        plan_obj = {'summary': 's', 'steps': [{'tool': 'read_gds', 'purpose': 'w', 'task_id': 'task-1'}]}
         resp_plan = {'role': 'assistant', 'content': json.dumps(plan_obj)}
         resp_final = {'role': 'assistant', 'content': json.dumps({'decision': 'stop', 'status': 'incomplete', 'reason': 'r', 'violations_analysis': [], 'recommendations': ''})}
 

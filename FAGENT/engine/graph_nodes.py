@@ -121,34 +121,102 @@ class GraphNodes:
         return updates
 
     def execute_plan(self, context, step):
-        """Request a structured violation plan and build the run-scoped checklist."""
+        """Construct deterministic planning context and obtain model plan."""
         state = context.state
         messages = list(state.get('messages', []))
+        replan_count = state.get('replan_count', 0)
+        replan_ctx = state.get('replan_context')
+        if replan_ctx:
+            replan_count += 1
+            if replan_count >= self.services.max_iterations:
+                reason = f'{context.task}/{step.id}: replanning iteration limit reached'
+                print(f'[ERROR] {reason}', file=sys.stderr)
+                return {'failed': True, 'replan_count': replan_count, 'result': {'status': 'incomplete', 'reason': reason}}
+
+        checklist_data = state.get('checklist')
+        checklist_obj = Checklist.from_dict(checklist_data) if checklist_data else None
+        active_tasks = [t for t in checklist_obj.tasks if t.get('status') in ('pending', 'in_progress', 'stale')] if checklist_obj else []
+
+        if checklist_obj and len(active_tasks) == 0:
+            plan = {'summary': 'No active violations', 'steps': []}
+            return {
+                'plan': plan,
+                'replan_count': replan_count,
+                'replan_context': None,
+                'iteration': 0,
+            }
+
         report = state.get('report')
-        if not isinstance(report, dict):
-            raise ValueError('DRC report must be read before planning')
+        if not isinstance(report, dict) and hasattr(self.services, 'drc_report'):
+            report = self.services.drc_report
+
+        active_rules = {t['rule'] for t in active_tasks}
+        active_violations = []
+        if report and isinstance(report.get('rules'), list):
+            for r in report['rules']:
+                if r.get('name') in active_rules:
+                    for geom in r.get('geometry', []):
+                        active_violations.append({
+                            'rule': r.get('name'),
+                            'id': geom.get('id'),
+                            'type': geom.get('type'),
+                            'points_dbu': geom.get('points_dbu'),
+                        })
+
+        rag_refs = list(state.get('drc_context', {}).get('knowledge', {}).get('references') or [])
+        if not rag_refs and hasattr(self.services, 'rag') and hasattr(self.services.rag, 'retrieve'):
+            try:
+                for rule_name in active_rules:
+                    rag_refs.extend(self.services.rag.retrieve(rule_name))
+            except Exception:
+                pass
+
         goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
+        constraints = state.get('drc_context', {}).get('knowledge', {}).get('constraints', [])
         instruction = getattr(step, 'prompt', None) or self.services.node_prompt(step)
-        plan_request = [
-            *messages,
-            {'role': 'user', 'content': json.dumps({f'{step.id}_instruction': instruction, 'goal': goal})},
-        ]
+
+        plan_payload = {
+            f'{step.id}_instruction': instruction,
+            'goal': goal,
+            'constraints': constraints,
+            'active_violations': active_violations,
+            'references': rag_refs,
+            'checklist': state.get('checklist'),
+        }
+        if replan_ctx:
+            plan_payload['replan_context'] = replan_ctx
+            plan_payload['candidate_digest'] = state.get('candidate_digest')
+            plan_payload['candidate_path'] = state.get('candidate_path')
+            plan_payload['current_plan'] = state.get('plan')
+
+        sys_msg = next((m for m in messages if m.get('role') == 'system'), None)
+        plan_request = [sys_msg] if sys_msg else []
+        plan_request.append({'role': 'user', 'content': json.dumps(plan_payload)})
+
         message = self.services.chat(plan_request, [], response_schema=step.schema)
         self.last_conversation = [*plan_request, message]
         if message.get('tool_calls'):
             raise ValueError('Plan step cannot invoke tools')
+
         plan = json.loads(message['content'])
         jsonschema.Draft202012Validator(step.schema).validate(plan)
-        checklist = Checklist().run(report, plan['tasks'], goal=goal)
-        snapshot = checklist.read()
-        checklist_path = Path(self.services.rundir) / 'checklist.json'
-        self.services.check_output_path(checklist_path)
-        checklist.save(checklist_path)
+
+        if len(active_tasks) > 0 and len(plan.get('steps', [])) == 0:
+            reason = 'Empty plan returned while active checklist tasks remain'
+            print(f'[ERROR] {reason}', file=sys.stderr)
+            return {
+                'failed': True,
+                'plan': plan,
+                'replan_count': replan_count,
+                'replan_context': None,
+                'result': {'status': 'incomplete', 'reason': reason},
+            }
+
         return {
             'messages': [*messages, message],
-            'checklist': snapshot,
-            'checklist_digest': snapshot['digest'],
-            'checklist_path': str(checklist_path),
+            'plan': plan,
+            'replan_count': replan_count,
+            'replan_context': None,
             'iteration': 0,
         }
 
@@ -170,6 +238,8 @@ class GraphNodes:
             goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
             agent_payload['current_checklist'] = state['checklist']
             agent_payload['goal'] = goal
+        if state.get('plan') is not None:
+            agent_payload['plan'] = state['plan']
         if agent_payload:
             request_messages.append({
                 'role': 'user',
@@ -253,6 +323,19 @@ class GraphNodes:
                 payload = json.dumps({'error': error})
                 if trace_inst and tool_op:
                     trace_inst.finish_operation(tool_op, 'tool_call', status='failed', error=exc, outputs={'error': error})
+                call_args = arguments if 'arguments' in locals() and isinstance(arguments, dict) else {}
+                relevant_vids = [call_args['task_id']] if 'task_id' in call_args else []
+                updates['replan_context'] = {
+                    'failed_tool': tool_name,
+                    'tool_call_id': call_id,
+                    'arguments': call_args,
+                    'error': error,
+                    'conversation': [
+                        messages[-1],
+                        {'role': 'tool', 'tool_call_id': call_id, 'content': payload},
+                    ],
+                    'relevant_violations': relevant_vids,
+                }
             messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
             if trace_inst:
                 trace_inst.append({
@@ -290,8 +373,13 @@ class GraphNodes:
         return self.trace_route(self.node_name(step.id), step.id, state, destination)
 
     def route_task_tools(self, state, step):
-        """Return to the caller unless the tool envelope failed."""
-        destination = 'END' if state.get('failed') else self.node_name(step.id)
+        """Return to caller or route to plan on tool failure."""
+        if state.get('failed'):
+            destination = 'END'
+        elif state.get('replan_context'):
+            destination = self.node_name('plan')
+        else:
+            destination = self.node_name(step.id)
         return self.trace_route(f'{step.id}--tools', step.id, state, destination)
 
     def trace_route(self, node, step, state, destination):

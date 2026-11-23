@@ -52,3 +52,6 @@ class FagentState(TypedDict, total=False):
     report: dict[str, Any]
     failed: bool
     pending_tools: bool
+    plan: dict[str, Any] | None
+    replan_context: dict[str, Any] | None
+    replan_count: int

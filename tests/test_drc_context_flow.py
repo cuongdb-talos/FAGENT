@@ -60,7 +60,7 @@ class TestDrcContextFlow:
         services.max_iterations = 4
         services.check_output_path = Mock()
         services.trace = None
-        plan = {'summary': 'inspect', 'tasks': [{'rule': 'RULE_A', 'violation_id': 7, 'work': 'inspect', 'status': 'pending', 'reason': ''}]}
+        plan = {'summary': 'inspect', 'steps': [{'tool': 'get_violation', 'purpose': 'inspect', 'task_id': 'task-1'}]}
         final = {'decision': 'stop', 'status': 'incomplete', 'reason': 'needs review', 'violations_analysis': [], 'recommendations': 'inspect'}
         services.chat = Mock(side_effect=[{'role': 'assistant', 'content': json.dumps(plan)}, {'role': 'assistant', 'content': json.dumps(final)}])
         graph = GraphBuilder(services, MemorySaver()).run()
@@ -70,7 +70,7 @@ class TestDrcContextFlow:
         assert state['checklist']['tasks'][0]['rule'] == 'RULE_A'
         plan_messages = services.chat.call_args_list[0].args[0]
         agent_messages = services.chat.call_args_list[1].args[0]
-        assert json.loads(plan_messages[1]['content'])['drc_context']['drc']['rules'] == report['rules']
+        assert json.loads(plan_messages[1]['content'])['active_violations'][0]['rule'] == 'RULE_A'
         assert json.loads(agent_messages[-1]['content'])['current_checklist'] == state['checklist']
         assert json.loads(agent_messages[-1]['content'])['goal'] == state['drc_context']['goal']
         assert services.rag.retrieve.call_count == 1
@@ -104,7 +104,7 @@ class TestDrcContextFlow:
         services.rag = SimpleNamespace(retrieve=Mock(return_value=[{'id': 'rec-1', 'score': 0.9}]))
 
         mock_client = Mock()
-        plan_obj = {'summary': 'Fix CT_R_11', 'tasks': [{'rule': 'CT_R_11', 'violation_id': 1, 'work': 'inspect', 'status': 'pending', 'reason': ''}]}
+        plan_obj = {'summary': 'Fix CT_R_11', 'steps': [{'tool': 'read_gds', 'purpose': 'inspect', 'task_id': 'task-1'}]}
         resp_plan = {'role': 'assistant', 'content': json.dumps(plan_obj)}
         resp_call_tool = {
             'role': 'assistant',
