@@ -5,9 +5,11 @@ import copy
 from pathlib import Path
 
 from FAGENT.capabilities.layout.cover_check import CoverCheck
+from FAGENT.capabilities.layout.violation_geometry import ViolationGeometry
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
 from FAGENT.tasks.drc.checklist import Checklist
+from FAGENT.tasks.drc.rule_evidence import RuleEvidence
 
 
 # === SECTION 2: Tools ===
@@ -71,6 +73,46 @@ class DrcTools:
         payload = {"cell": cell_name, "inner_id": inner_id, "outer_id": outer_id, **result}
         return ToolResult(payload, {})
 
+    def find_rule(context, task_id):
+        """Retrieve original rule text, source locations, and physical layer maps."""
+        raw = context.state.get("checklist")
+        if not raw:
+            raise ValueError("Checklist has not been initialized for this run")
+        checklist = Checklist.from_dict(raw)
+        task = next((t for t in checklist.tasks if t.get("task_id") == task_id), None)
+        if task is None:
+            raise ValueError(f"Unknown checklist task_id: {task_id}")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        return ToolResult(evidence, {})
+
+    def find_related_polygons(context, task_id, search_margin_dbu=0):
+        """Resolve DRC marker to candidate layout polygons with candidate digest binding."""
+        v_result = DrcTools.get_violation(context, task_id)
+        task = v_result.payload.get("task") or {}
+        task["violation"] = v_result.payload.get("violation")
+        task["owning_cell"] = v_result.payload.get("owning_cell")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        geom_result = ViolationGeometry().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+            search_margin_dbu=search_margin_dbu,
+        )
+        return ToolResult(geom_result, {})
+
     def read_checklist(context):
         """Return the current run-scoped violation checklist."""
         raw = context.state.get("checklist")
@@ -129,6 +171,46 @@ class DrcTools:
         }
         return ToolResult(payload, {})
 
+    def find_rule(context, task_id):
+        """Retrieve original rule text, source locations, and physical layer maps."""
+        raw = context.state.get("checklist")
+        if not raw:
+            raise ValueError("Checklist has not been initialized for this run")
+        checklist = Checklist.from_dict(raw)
+        task = next((t for t in checklist.tasks if t.get("task_id") == task_id), None)
+        if task is None:
+            raise ValueError(f"Unknown checklist task_id: {task_id}")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        return ToolResult(evidence, {})
+
+    def find_related_polygons(context, task_id, search_margin_dbu=0):
+        """Resolve DRC marker to candidate layout polygons with candidate digest binding."""
+        v_result = DrcTools.get_violation(context, task_id)
+        task = v_result.payload.get("task") or {}
+        task["violation"] = v_result.payload.get("violation")
+        task["owning_cell"] = v_result.payload.get("owning_cell")
+
+        cfg = getattr(context.services, "config", {}) or {}
+        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
+        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+
+        rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
+        geom_result = ViolationGeometry().run(
+            task=task,
+            rule_evidence=rule_evidence,
+            layout=context.services.layout,
+            candidate_digest=context.state.get("candidate_digest"),
+            search_margin_dbu=search_margin_dbu,
+        )
+        return ToolResult(geom_result, {})
+
     def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
         """Update one existing checklist task and persist the updated checklist atomically."""
         raw = context.state.get("checklist")
@@ -160,6 +242,8 @@ class DrcTools:
     check_cover = staticmethod(check_cover)
     read_checklist = staticmethod(read_checklist)
     get_violation = staticmethod(get_violation)
+    find_rule = staticmethod(find_rule)
+    find_related_polygons = staticmethod(find_related_polygons)
     update_checklist = staticmethod(update_checklist)
 
 
@@ -236,6 +320,33 @@ get_violation.task_tool = ToolSpec(
         "type": "object",
         "properties": {
             "task_id": {"type": "string"},
+        },
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+find_rule = DrcTools.find_rule
+find_rule.task_tool = ToolSpec(
+    function=find_rule,
+    description="Retrieve named rule text, line numbers, and physical layer maps from the rule deck.",
+    parameters={
+        "type": "object",
+        "properties": {"task_id": {"type": "string"}},
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+find_related_polygons = DrcTools.find_related_polygons
+find_related_polygons.task_tool = ToolSpec(
+    function=find_related_polygons,
+    description="Find live layout polygons overlapping the DRC violation marker on physical layers.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "search_margin_dbu": {"type": "number"},
         },
         "required": ["task_id"],
         "additionalProperties": False,
