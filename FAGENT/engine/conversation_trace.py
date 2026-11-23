@@ -143,7 +143,7 @@ class ConversationTrace:
         op_id = event.get('operation_id', '')
         name = event.get('name', '')
         ts = event.get('timestamp', '')
-        display_name = name.replace('_', ' ').upper()
+        display_name = 'READ DRC' if name in ('drc_read', 'read_drc') else 'RAG RETRIEVE' if name == 'rag_retrieve' else name.replace('_', ' ').upper()
 
         if kind == 'operation_start':
             inputs = event.get('inputs')
@@ -173,8 +173,23 @@ class ConversationTrace:
             if error:
                 lines.append(f'  Error: {error}')
             if isinstance(outputs, dict):
+                if name in ('drc_read', 'read_drc'):
+                    viol = outputs.get('total_violations')
+                    if viol is None and isinstance(outputs.get('report'), dict):
+                        viol = outputs['report'].get('total_violations', len(outputs['report'].get('rules', [])))
+                    lines.append(f'  READ DRC violations={viol}')
+                elif name == 'rag_retrieve':
+                    rules_str = ','.join(str(r) for r in outputs.get('rules', []))
+                    cnt = outputs.get('results_count', len(outputs.get('records', [])))
+                    lines.append(f'  RAG RETRIEVE rules={rules_str} results={cnt}')
+                    records = outputs.get('records', [])
+                    if isinstance(records, list) and records:
+                        rec_parts = [f"id={r.get('id')} score={r.get('score')}" if isinstance(r, dict) else str(r) for r in records[:5]]
+                        lines.append(f'  Records: {", ".join(rec_parts)}')
                 parts = []
                 for k, v in outputs.items():
+                    if k in ('report', 'records'):
+                        continue
                     if isinstance(v, (str, int, float, bool)):
                         parts.append(f'{k}={v}')
                     elif isinstance(v, list):

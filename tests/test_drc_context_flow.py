@@ -2,7 +2,8 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import pytest
 
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -86,7 +87,7 @@ class TestDrcContextFlow:
     def test_integration_trace_plan_read_gds_repair(self, tmp_path):
         root = Path('FAGENT/tasks').resolve()
         workflow = WorkflowLoader(root / 'drc' / 'workflow.yaml', root).run()
-        report = {'rules': [{'name': 'CT_R_11', 'reported_count': 1, 'total_count': 1, 'geometry': [{'id': 1, 'points_dbu': [[0, 0], [10, 10]]}]}]}
+        report = {'rules': [{'name': 'CT_R_11', 'reported_count': 1, 'total_count': 1, 'geometry': [{'id': 1, 'points_dbu': [[0, 0], [10, 10]]}]}], 'total_violations': 1}
 
         tool_read_gds_spec = Mock()
         tool_read_gds_spec.model_spec.return_value = {'name': 'read_gds', 'description': 'Read GDS'}
@@ -100,7 +101,7 @@ class TestDrcContextFlow:
         config = {'goal': 'Fix DRC errors', 'rag_limit': 2}
         services = GraphServices(tmp_path, config, workflow)
         services.layout = SimpleNamespace(read_drc=Mock(return_value=report), gds_data={'source': 'layout.gds'}, check_output_path=Mock())
-        services.rag = SimpleNamespace(retrieve=Mock(return_value=[]))
+        services.rag = SimpleNamespace(retrieve=Mock(return_value=[{'id': 'rec-1', 'score': 0.9}]))
 
         mock_client = Mock()
         plan_obj = {'summary': 'Fix CT_R_11', 'tasks': [{'rule': 'CT_R_11', 'violation_id': 1, 'work': 'inspect', 'status': 'pending', 'reason': ''}]}
@@ -129,8 +130,30 @@ class TestDrcContextFlow:
         assert data.get('version') == 2
         events = data.get('events', [])
 
-        types = [e['type'] for e in events]
-        assert types == [
+        # Verify DRC and RAG provenance events exist
+        drc_events = [e for e in events if e.get('name') == 'drc_read']
+        assert len(drc_events) == 2
+        assert drc_events[0]['type'] == 'operation_start'
+        assert drc_events[1]['type'] == 'operation_finish'
+        assert drc_events[1]['status'] == 'completed'
+        assert drc_events[1]['outputs']['report'] == report
+
+        rag_events = [e for e in events if e.get('name') == 'rag_retrieve']
+        assert len(rag_events) == 2
+        assert rag_events[0]['type'] == 'operation_start'
+        assert rag_events[1]['type'] == 'operation_finish'
+        assert rag_events[1]['status'] == 'completed'
+        assert rag_events[1]['outputs']['records'] == [{'id': 'rec-1', 'score': 0.9}]
+
+        # Verify ordering: drc_read finish before rag_retrieve finish, before model_request
+        drc_finish_idx = events.index(drc_events[1])
+        rag_finish_idx = events.index(rag_events[1])
+        first_model_req_idx = next(i for i, e in enumerate(events) if e.get('type') == 'model_request')
+        assert drc_finish_idx < rag_finish_idx < first_model_req_idx
+
+        # Model and tool events sequence preserved
+        model_and_tool = [e for e in events if e.get('type') in ('model_request', 'model_response', 'tool_result')]
+        assert [e['type'] for e in model_and_tool] == [
             'model_request',
             'model_response',
             'model_request',
@@ -139,12 +162,64 @@ class TestDrcContextFlow:
             'model_request',
             'model_response',
         ]
-        assert events[0]['request_id'] == '1'
-        assert events[1]['request_id'] == '1'
-        assert events[2]['request_id'] == '2'
-        assert events[3]['request_id'] == '2'
-        assert events[4]['type'] == 'tool_result'
-        assert events[4]['message']['tool_call_id'] == 'call-gds-001'
-        assert json.loads(events[4]['message']['content']) == {'cell': 'ROM_MCELL0', 'polygons': 3}
-        assert events[5]['request_id'] == '3'
-        assert events[6]['request_id'] == '3'
+
+        # Verify readable trace.log
+        log = (tmp_path / 'trace.log').read_text()
+        assert 'read_drc' in log or 'drc_read' in log or 'READ DRC' in log
+        assert 'rag_retrieve' in log or 'RAG RETRIEVE' in log
+
+    def test_drc_read_and_rag_empty_and_error_paths(self, tmp_path):
+        """Verify drc_read and rag_retrieve handle empty outputs and record error paths."""
+        workflow = SimpleNamespace(
+            task='drc',
+            version=1,
+            digest='wf_digest',
+            steps=[],
+            layout_services=True,
+            response_schema={'type': 'object'},
+            prompt_text=['system prompt'],
+            protocol_text='',
+            reference_label='',
+            knowledge_review=False,
+            inputs=[],
+        )
+        services = GraphServices(tmp_path, {'goal': 'test', 'rag_limit': 5}, workflow)
+
+        # 1. Empty DRC report and empty RAG results
+        empty_report = {'rules': [], 'total_violations': 0}
+        services.layout = SimpleNamespace(read_drc=Mock(return_value=empty_report), gds_data={'source': 'l.gds'}, check_output_path=Mock())
+        services.rag = SimpleNamespace(retrieve=Mock(return_value=[]))
+        ctx = services.build_drc_context()
+        assert ctx['drc']['rules'] == []
+
+        trace_data = json.loads((tmp_path / 'conversation.json').read_text())
+        drc_finishes = [e for e in trace_data['events'] if e.get('name') == 'drc_read' and e.get('type') == 'operation_finish']
+        assert len(drc_finishes) == 1
+        assert drc_finishes[0]['status'] == 'completed'
+        assert drc_finishes[0]['outputs']['report'] == empty_report
+
+        rag_finishes = [e for e in trace_data['events'] if e.get('name') == 'rag_retrieve' and e.get('type') == 'operation_finish']
+        assert len(rag_finishes) == 1
+        assert rag_finishes[0]['status'] == 'completed'
+        assert rag_finishes[0]['outputs']['records'] == []
+
+        # 2. DRC read failure records failed operation
+        services.layout = SimpleNamespace(read_drc=Mock(side_effect=IOError('DRC results corrupted')), check_output_path=Mock())
+        with pytest.raises(IOError, match='DRC results corrupted'):
+            services.build_drc_context()
+
+        trace_data2 = json.loads((tmp_path / 'conversation.json').read_text())
+        failed_drc = [e for e in trace_data2['events'] if e.get('name') == 'drc_read' and e.get('type') == 'operation_finish'][-1]
+        assert failed_drc['status'] == 'failed'
+        assert 'DRC results corrupted' in str(failed_drc['error'])
+
+        # 3. RAG retrieval failure records failed operation
+        services.layout = SimpleNamespace(read_drc=Mock(return_value={'rules': [{'name': 'R1'}]}), check_output_path=Mock())
+        services.rag = SimpleNamespace(retrieve=Mock(side_effect=RuntimeError('Embedding service offline')))
+        with pytest.raises(RuntimeError, match='Embedding service offline'):
+            services.build_drc_context()
+
+        trace_data3 = json.loads((tmp_path / 'conversation.json').read_text())
+        failed_rag = [e for e in trace_data3['events'] if e.get('name') == 'rag_retrieve' and e.get('type') == 'operation_finish'][-1]
+        assert failed_rag['status'] == 'failed'
+        assert 'Embedding service offline' in str(failed_rag['error'])

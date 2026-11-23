@@ -180,20 +180,93 @@ class GraphServices:
 
     def build_drc_context(self):
         """Read DRC and layout data, then retrieve related knowledge for the graph."""
-        report = self.layout.read_drc()
-        self.drc_report = report
+        read_op = None
+        if hasattr(self, 'conversation_trace') and self.conversation_trace:
+            read_op = self.conversation_trace.start_operation(
+                'drc_read',
+                {'source': getattr(self.layout, 'drc_path', None) or getattr(self.layout, 'drc_data', {}).get('source')},
+            )
+        try:
+            report = self.layout.read_drc()
+            self.drc_report = report
+            if read_op and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                self.conversation_trace.finish_operation(
+                    read_op,
+                    'drc_read',
+                    status='completed',
+                    outputs={'report': report, 'total_violations': report.get('total_violations', len(report.get('rules', [])))},
+                )
+        except Exception as exc:
+            if read_op and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                self.conversation_trace.finish_operation(read_op, 'drc_read', status='failed', error=exc)
+            raise
+
         if self.rag is None:
-            self.embedding_client = LlamaAdapter(self.config)
-            self.rag = HybridRetriever(self.config.get('knowledge_dir'), self.config, embedding_client=self.embedding_client).run()
-            self.rag.migrate_legacy(self.rag.knowledge_dir / 'knowledge_db.json')
-            if self.config.get('reference_dir'):
-                self.rag.index_documents(self.config['reference_dir'])
-            self.rag.index_rule_decks(self.config.get('drc_files', []))
+            rag_init_op = None
+            if hasattr(self, 'conversation_trace') and self.conversation_trace:
+                rag_init_op = self.conversation_trace.start_operation(
+                    'rag_init',
+                    {
+                        'knowledge_dir': str(self.config.get('knowledge_dir')),
+                        'reference_dir': str(self.config.get('reference_dir')) if self.config.get('reference_dir') else None,
+                        'drc_files': self.config.get('drc_files', []),
+                    },
+                )
+            try:
+                self.embedding_client = LlamaAdapter(self.config)
+                self.rag = HybridRetriever(self.config.get('knowledge_dir'), self.config, embedding_client=self.embedding_client).run()
+                self.rag.migrate_legacy(self.rag.knowledge_dir / 'knowledge_db.json')
+                doc_count = 0
+                if self.config.get('reference_dir'):
+                    doc_count = self.rag.index_documents(self.config['reference_dir'])
+                deck_count = self.rag.index_rule_decks(self.config.get('drc_files', []))
+                if rag_init_op and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                    self.conversation_trace.finish_operation(
+                        rag_init_op,
+                        'rag_init',
+                        status='completed',
+                        outputs={'indexed_documents': doc_count, 'indexed_rules': deck_count},
+                    )
+            except Exception as exc:
+                if rag_init_op and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                    self.conversation_trace.finish_operation(rag_init_op, 'rag_init', status='failed', error=exc)
+                raise
+
         context = self.drc_context(report)
         rules = context.get('rules') or [{'name': key} for key in context.get('violations_by_rule', {})]
         names = [rule['name'] for rule in rules if rule.get('name')]
         query = ' '.join(names + [str(rule.get('description', '')) for rule in rules])
-        references = self.rag.retrieve(query, names, self.config['rag_limit']) if query else []
+
+        rag_ret_op = None
+        if hasattr(self, 'conversation_trace') and self.conversation_trace:
+            rag_ret_op = self.conversation_trace.start_operation(
+                'rag_retrieve',
+                {
+                    'query': query,
+                    'rules': names,
+                    'limit': self.config.get('rag_limit', 0),
+                },
+            )
+        try:
+            references = self.rag.retrieve(query, names, self.config['rag_limit']) if query else []
+            if rag_ret_op and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                self.conversation_trace.finish_operation(
+                    rag_ret_op,
+                    'rag_retrieve',
+                    status='completed',
+                    outputs={
+                        'query': query,
+                        'rules': names,
+                        'limit': self.config.get('rag_limit', 0),
+                        'results_count': len(references),
+                        'records': references,
+                    },
+                )
+        except Exception as exc:
+            if rag_ret_op and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                self.conversation_trace.finish_operation(rag_ret_op, 'rag_retrieve', status='failed', error=exc)
+            raise
+
         compact = {key: report[key] for key in ('top_cell', 'dbu_per_user_unit', 'total_violations', 'clean') if key in report}
         compact['rules'] = [
             {key: rule[key] for key in ('name', 'description', 'reported_count', 'total_count', 'geometry') if key in rule}
