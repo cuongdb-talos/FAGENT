@@ -5,42 +5,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
 
+from FAGENT.engine.conversation_trace import ConversationTrace
 from FAGENT.engine.graph_nodes import GraphNodes
+from FAGENT.engine.graph_runner import GraphRunner
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import TaskContext
-from FAGENT.engine.conversation_trace import ConversationTrace
 
 # === SECTION 2: Test Suite ===
 
 
 class TestConversationSnapshots:
-    """Test suite for conversation trace and snapshot persistence."""
-
-    def test_agent_saves_response_before_returning(self, tmp_path):
-        message = {'role': 'assistant', 'tool_calls': [{'id': 'call-1', 'function': {'name': 'inspect', 'arguments': '{}'}}]}
-        services = SimpleNamespace(rundir=tmp_path, max_iterations=2, chat=Mock(return_value=message), check_output_path=Mock())
-        context = TaskContext('task', {}, {'messages': [{'role': 'user', 'content': 'inspect'}]}, services)
-        updates = GraphNodes(services).execute_agent(context, SimpleNamespace(tools={}, schema=None))
-        assert json.loads((tmp_path / 'conversation.json').read_text()) == updates['messages']
-
-    def test_tool_result_is_saved_before_next_response(self, tmp_path):
-        message = {'role': 'assistant', 'tool_calls': [{'id': 'call-1', 'function': {'name': 'inspect', 'arguments': '{}'}}]}
-        services = SimpleNamespace(rundir=tmp_path, check_output_path=Mock())
-        spec = SimpleNamespace(parameters={'type': 'object'}, function=Mock(return_value={'status': 'ok'}))
-        context = TaskContext('task', {}, {'messages': [message]}, services)
-        updates = GraphNodes(services).execute_tools(context, SimpleNamespace(tools={'inspect': spec}, id='agent'))
-        assert json.loads((tmp_path / 'conversation.json').read_text()) == updates['messages']
-
-    def test_invalid_agent_response_is_retained_in_failed_state(self, tmp_path):
-        message = {'role': 'assistant', 'content': '{invalid json'}
-        workflow = SimpleNamespace(task='task', inputs=[])
-        services = SimpleNamespace(rundir=tmp_path, max_iterations=2, workflow=workflow, chat=Mock(return_value=message), check_output_path=Mock())
-        state = {'messages': [{'role': 'user', 'content': 'inspect'}]}
-        step = SimpleNamespace(id='agent', action='agent', tools={}, schema=None)
-        updates = GraphNodes(services).run_task_step(state, step)
-        assert updates['failed'] is True
-        assert updates['messages'][-1] == message
-        assert json.loads((tmp_path / 'conversation.json').read_text()) == updates['messages']
+    """Test suite for conversation trace, tool capturing, and artifact protection."""
 
     def test_chat_records_requests_and_responses_in_order(self, tmp_path):
         workflow = SimpleNamespace(response_schema={'type': 'object', 'title': 'default'})
@@ -159,3 +134,94 @@ class TestConversationSnapshots:
         assert events[2]['request_id'] == '2'
         assert events[3]['type'] == 'model_response'
         assert events[3]['request_id'] == '2'
+
+    def test_tool_result_is_recorded_in_trace(self, tmp_path):
+        workflow = SimpleNamespace(response_schema=None)
+        config = {'goal': 'repair'}
+        services = GraphServices(tmp_path, config, workflow)
+        call = {'id': 'call-101', 'function': {'name': 'inspect', 'arguments': '{"target": "cellA"}'}}
+        message = {'role': 'assistant', 'tool_calls': [call]}
+
+        spec = SimpleNamespace(parameters={'type': 'object'}, function=Mock(return_value={'status': 'inspected'}))
+        context = TaskContext('task', {}, {'messages': [message]}, services)
+        updates = GraphNodes(services).execute_tools(context, SimpleNamespace(tools={'inspect': spec}, id='agent'))
+
+        assert updates['messages'][-1] == {
+            'role': 'tool',
+            'tool_call_id': 'call-101',
+            'content': json.dumps({'status': 'inspected'}),
+        }
+        trace_file = tmp_path / 'conversation.json'
+        assert trace_file.is_file()
+        data = json.loads(trace_file.read_text(encoding='utf-8'))
+        assert data.get('version') == 2
+        events = data.get('events', [])
+        assert len(events) == 1
+        assert events[0] == {
+            'type': 'tool_result',
+            'message': {
+                'role': 'tool',
+                'tool_call_id': 'call-101',
+                'content': json.dumps({'status': 'inspected'}),
+            },
+        }
+
+    def test_tool_exception_records_error_returned_to_model(self, tmp_path):
+        workflow = SimpleNamespace(response_schema=None)
+        config = {'goal': 'repair'}
+        services = GraphServices(tmp_path, config, workflow)
+        call = {'id': 'call-102', 'function': {'name': 'fail_tool', 'arguments': '{}'}}
+        message = {'role': 'assistant', 'tool_calls': [call]}
+
+        spec = SimpleNamespace(parameters={'type': 'object'}, function=Mock(side_effect=ValueError('Invalid polygon ID')))
+        context = TaskContext('task', {}, {'messages': [message]}, services)
+        updates = GraphNodes(services).execute_tools(context, SimpleNamespace(tools={'fail_tool': spec}, id='agent'))
+
+        assert 'Invalid polygon ID' in updates['messages'][-1]['content']
+        trace_file = tmp_path / 'conversation.json'
+        data = json.loads(trace_file.read_text(encoding='utf-8'))
+        assert data.get('version') == 2
+        events = data.get('events', [])
+        assert len(events) == 1
+        assert events[0]['type'] == 'tool_result'
+        assert events[0]['message']['tool_call_id'] == 'call-102'
+        assert events[0]['message']['content'] == updates['messages'][-1]['content']
+        assert 'Invalid polygon ID' in events[0]['message']['content']
+
+    def test_invalid_agent_response_preserves_trace_and_reports_failure(self, tmp_path):
+        workflow = SimpleNamespace(task='task', inputs=[], response_schema={'type': 'object', 'required': ['verdict']})
+        config = {'goal': 'repair'}
+        services = GraphServices(tmp_path, config, workflow)
+        mock_client = Mock()
+        mock_client.chat.return_value = {'role': 'assistant', 'content': 'not valid json'}
+        services.client = mock_client
+
+        state = {'messages': [{'role': 'user', 'content': 'start repair'}]}
+        step = SimpleNamespace(id='agent', action='agent', tools={}, schema={'type': 'object', 'required': ['verdict']})
+        updates = GraphNodes(services).run_task_step(state, step)
+
+        assert updates['failed'] is True
+        trace_file = tmp_path / 'conversation.json'
+        data = json.loads(trace_file.read_text(encoding='utf-8'))
+        assert data.get('version') == 2
+        events = data.get('events', [])
+        assert len(events) == 2
+        assert events[0]['type'] == 'model_request'
+        assert events[1]['type'] == 'model_response'
+        assert events[1]['message']['content'] == 'not valid json'
+
+    def test_finish_does_not_overwrite_conversation_trace(self, tmp_path):
+        workflow = SimpleNamespace(response_schema={'type': 'object'})
+        config = {'goal': 'repair'}
+        services = GraphServices(tmp_path, config, workflow)
+        trace_file = tmp_path / 'conversation.json'
+        services.conversation_trace.append({'type': 'tool_result', 'message': {'role': 'tool', 'tool_call_id': 'c1', 'content': '{}'}})
+
+        runner = GraphRunner(services, tmp_path)
+        dummy_state = {'messages': [{'role': 'user', 'content': 'legacy plain message'}], 'inputs': {}, 'response': {'status': 'done'}}
+        runner.finish(dummy_state)
+
+        data = json.loads(trace_file.read_text(encoding='utf-8'))
+        assert data.get('version') == 2
+        assert len(data.get('events', [])) == 1
+        assert data['events'][0]['type'] == 'tool_result'

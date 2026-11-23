@@ -135,7 +135,10 @@ class GraphRunner:
         while state.get('__interrupt__'):
             feedback = self.read_feedback(state['__interrupt__'][0].value)
             state = self.resume_graph(state, feedback)
-        self.result = dict(state.get('result') or {'status': 'incomplete', 'reason': 'No result'})
+        fallback = {'status': 'incomplete', 'reason': 'No result'}
+        if state.get('response') is not None:
+            fallback = {'status': 'incomplete', 'reason': 'No verified validation', 'response': state['response']}
+        self.result = dict(state.get('result') or fallback)
         inputs = state.get('inputs') or {}
         self.result['run_id'] = inputs.get('run_id') or (self.rundir.parent.name if self.rundir.name == 'rundir' else self.thread_id)
         self.result['thread_id'] = self.thread_id
@@ -152,7 +155,6 @@ class GraphRunner:
         self.result['review'] = state.get('review') or {'authorized': False}
         self.messages = state.get('messages', [])
         artifacts = (
-            (self.rundir / 'conversation.json', self.messages),
             (self.rundir / 'result.json', self.result),
         )
         for target, _ in artifacts:

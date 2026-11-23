@@ -6,6 +6,7 @@
 import json
 from pathlib import Path
 import sys
+import tempfile
 import traceback
 
 import jsonschema
@@ -39,12 +40,14 @@ class GraphNodes:
     def __init__(self, services):
         self.services = services
         self.trace = getattr(services, "trace", None)
+        self.last_conversation = None
 
     # --------------------------------------------------------------------------
     # Message Context Helpers
     # --------------------------------------------------------------------------
     def run_task_step(self, state, step, tools=False):
         """Invoke a local step and capture serializable updates."""
+        self.last_conversation = None
         workflow = self.services.workflow
         node = f'{step.id}--tools' if tools else self.node_name(step.id)
         if self.trace:
@@ -78,7 +81,10 @@ class GraphNodes:
                 reason += f' (missing inputs: {", ".join(sorted(missing))})'
             print(f'[ERROR] {reason}', file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
+            update = {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
+            if self.last_conversation is not None:
+                update['messages'] = self.last_conversation
+            return update
 
     def execute_step(self, context, step):
         """Return the JSON-compatible mapping from a resolved step."""
@@ -95,12 +101,13 @@ class GraphNodes:
         report = state.get('report')
         if not isinstance(report, dict):
             raise ValueError('DRC report must be read before planning')
-        goal = self.services.config.get('goal', '') if hasattr(self.services, 'config') else ''
+        goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
         plan_request = [
             *messages,
-            {'role': 'user', 'content': json.dumps({'plan_instruction': step.prompt, 'goal': goal, 'drc': report})},
+            {'role': 'user', 'content': json.dumps({'plan_instruction': step.prompt, 'goal': goal})},
         ]
         message = self.services.chat(plan_request, [], response_schema=step.schema)
+        self.last_conversation = [*plan_request, message]
         if message.get('tool_calls'):
             raise ValueError('Plan step cannot invoke tools')
         plan = json.loads(message['content'])
@@ -111,7 +118,7 @@ class GraphNodes:
         self.services.check_output_path(checklist_path)
         checklist.save(checklist_path)
         return {
-            'messages': [*messages, message],
+            'messages': [*plan_request, message],
             'checklist': snapshot,
             'checklist_digest': snapshot['digest'],
             'checklist_path': str(checklist_path),
@@ -129,7 +136,7 @@ class GraphNodes:
         messages = list(state.get('messages', []))
         request_messages = list(messages)
         if state.get('checklist') is not None:
-            goal = self.services.config.get('goal', '') if hasattr(self.services, 'config') else ''
+            goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
             request_messages.append({
                 'role': 'user',
                 'content': json.dumps({'current_checklist': state['checklist'], 'goal': goal}),
@@ -139,6 +146,7 @@ class GraphNodes:
             [spec.model_spec(name) for name, spec in step.tools.items()],
             response_schema=getattr(step, 'schema', None),
         )
+        self.last_conversation = [*messages, message]
         calls = message.get('tool_calls')
         updates = {'messages': [*messages, message], 'iteration': iteration + 1, 'pending_tools': bool(calls)}
         if not calls:
@@ -199,7 +207,17 @@ class GraphNodes:
                 traceback.print_exc(file=sys.stderr)
                 payload = json.dumps({'error': error})
             messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
+            if hasattr(self.services, 'conversation_trace') and self.services.conversation_trace:
+                self.services.conversation_trace.append({
+                    'type': 'tool_result',
+                    'message': {'role': 'tool', 'tool_call_id': call_id, 'content': payload},
+                })
+            self.last_conversation = list(messages)
         return {**updates, 'messages': messages, 'pending_tools': False}
+
+    def save_conversation(self, messages):
+        """Keep in-memory reference to the latest conversation messages."""
+        self.last_conversation = list(messages)
 
     def node_name(step_id):
         """Keep workflow identifiers that overlap LangGraph state channels."""
