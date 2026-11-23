@@ -6,6 +6,7 @@ from pathlib import Path
 from FAGENT.capabilities.layout.cover_check import CoverCheck
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
+from FAGENT.tasks.drc.checklist import Checklist
 
 
 # === SECTION 2: Tools ===
@@ -36,7 +37,17 @@ class DrcTools:
                 raise ValueError("Missing candidate digest")
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
             return ToolResult({"error": type(exc).__name__}, {"candidate_path": None, "candidate_digest": None, "validation": None})
-        return ToolResult(result, {"candidate_path": str(candidate), "candidate_digest": digest, "validation": None})
+        updates = {"candidate_path": str(candidate), "candidate_digest": digest, "validation": None}
+        if context.state.get("checklist"):
+            checklist = Checklist.from_dict(context.state["checklist"])
+            checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
+            checklist_path = Path(context.services.rundir) / "checklist.json"
+            context.services.check_output_path(checklist_path)
+            checklist.save(checklist_path)
+            updates["checklist"] = checklist_snapshot
+            updates["checklist_digest"] = checklist_snapshot["digest"]
+            updates["checklist_path"] = str(checklist_path)
+        return ToolResult(result, updates)
 
     def check_cover(context, cell_name, inner_id, outer_id, minimum):
         """Evaluate geometric enclosure between two direct polygons identified by stable IDs."""
@@ -59,9 +70,45 @@ class DrcTools:
         payload = {"cell": cell_name, "inner_id": inner_id, "outer_id": outer_id, **result}
         return ToolResult(payload, {})
 
+    def read_checklist(context):
+        """Return the current run-scoped violation checklist."""
+        raw = context.state.get("checklist")
+        if not raw:
+            raise ValueError("Checklist has not been initialized for this run")
+        checklist = Checklist.from_dict(raw)
+        return ToolResult(checklist.read(), {})
+
+    def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
+        """Update one existing checklist task and persist the updated checklist atomically."""
+        raw = context.state.get("checklist")
+        if not raw:
+            raise ValueError("Checklist has not been initialized for this run")
+        checklist = Checklist.from_dict(raw)
+        snapshot = checklist.update(
+            task_id=task_id,
+            status=status,
+            work=work,
+            reason=reason,
+            polygon_ids=polygon_ids,
+            evidence=evidence,
+        )
+        checklist_path = Path(context.services.rundir) / "checklist.json"
+        context.services.check_output_path(checklist_path)
+        checklist.save(checklist_path)
+        return ToolResult(
+            snapshot,
+            {
+                "checklist": snapshot,
+                "checklist_digest": snapshot["digest"],
+                "checklist_path": str(checklist_path),
+            },
+        )
+
     run = staticmethod(run)
     replace = staticmethod(replace)
     check_cover = staticmethod(check_cover)
+    read_checklist = staticmethod(read_checklist)
+    update_checklist = staticmethod(update_checklist)
 
 
 read_gds = DrcTools.run
@@ -114,6 +161,36 @@ check_cover.task_tool = ToolSpec(
             "minimum": {"type": "number"},
         },
         "required": ["cell_name", "inner_id", "outer_id", "minimum"],
+        "additionalProperties": False,
+    },
+)
+
+read_checklist = DrcTools.read_checklist
+read_checklist.task_tool = ToolSpec(
+    function=read_checklist,
+    description="Read the current run-scoped DRC repair checklist and task statuses.",
+    parameters={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+)
+
+update_checklist = DrcTools.update_checklist
+update_checklist.task_tool = ToolSpec(
+    function=update_checklist,
+    description="Update an existing DRC checklist task status, work description, reason, polygon_ids, and evidence.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "pass", "skipped", "unresolved"]},
+            "work": {"type": "string"},
+            "reason": {"type": "string"},
+            "polygon_ids": {"type": "array", "items": {"type": "string"}},
+            "evidence": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["task_id", "status", "reason"],
         "additionalProperties": False,
     },
 )

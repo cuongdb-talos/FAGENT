@@ -44,6 +44,9 @@ class FagentState(TypedDict, total=False):
     inspected: list[str]
     identity: dict[str, Any]
     candidate_digest: str | None
+    checklist: dict[str, Any] | None
+    checklist_digest: str | None
+    checklist_path: str | None
     task_state: dict[str, Any]
     failed: bool
     pending_tools: bool

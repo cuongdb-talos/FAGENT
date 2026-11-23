@@ -20,6 +20,7 @@ from langgraph.types import Command
 from .graph_builder import GraphBuilder
 from .graph_nodes import GraphNodes
 from .graph_services import GraphServices
+from ..tasks.drc.checklist import Checklist
 
 
 # ==============================================================================
@@ -103,13 +104,18 @@ class GraphRunner:
         return self.finish(self.resume_graph(snapshot.values, feedback))
 
     def verify_candidate(self, state):
-        """Check the saved layout before using a review response."""
+        """Check the saved layout and checklist before using a review response."""
         candidate = state.get('candidate_path')
         if candidate:
             self.services.check_output_path(Path(candidate))
             digest = state.get('candidate_digest')
             if not digest or GraphServices.candidate_digest(Path(candidate)) != digest:
                 raise ValueError('Checkpoint candidate is missing or changed')
+        checklist_path = state.get('checklist_path')
+        if checklist_path:
+            self.services.check_output_path(Path(checklist_path))
+            checklist_digest = state.get('checklist_digest')
+            Checklist().restore(Path(checklist_path), checklist_digest)
     def resume_graph(self, state, feedback):
         """Recheck identity after waiting for feedback and resume the graph."""
         if state.get('identity') != self.workflow_identity():

@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "violation_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "occurrence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "work": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "skipped",
+              "unresolved"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "polygon_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "rule",
+          "violation_id",
+          "work",
+          "status",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "summary",
+    "tasks"
+  ],
+  "additionalProperties": false
+}
