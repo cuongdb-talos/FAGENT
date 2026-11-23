@@ -1,10 +1,9 @@
 """Task-local execution steps."""
 
 # === SECTION 1: Imports ===
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from pathlib import Path
-from uuid import uuid4
 
 from FAGENT.capabilities.layout.input_loader import InputLoader
 from FAGENT.engine.graph_services import GraphServices
@@ -79,21 +78,26 @@ class Steps:
             gds = gds_directory / f'{cell}.gds'
             drc = drc_directory / f'{cell}.drc.results'
             resolved_maps = [(base / path).resolve() for path in maps]
-            run_id, rundir = self.allocate_rundir(output, cell)
+            task_name = task_cfg.get('task_name') or task_cfg.get('task') or 'drc'
+            run_id, rundir = self.allocate_rundir(output, cell, task_name=task_name)
             InputLoader(gds_path=gds, drc_path=drc, output_dir=rundir,
                         layer_map_files=resolved_maps, verbose=verbose).run()
             yield rundir, config, {**task_cfg, 'cell': cell, 'run_id': run_id, 'rundir': str(rundir),
                                    'gds': str(gds), 'drc': str(drc),
                                    'layer_map': [str(path) for path in resolved_maps]}
 
-    def allocate_rundir(self, output, cell):
+    def allocate_rundir(self, output, cell, task_name='drc'):
         """Allocate a fresh unique run directory for one cell execution."""
-        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        stamp = datetime.now().strftime('%H:%M:%S-%d%b%Y')
+        base_id = f'{stamp}-{task_name}'
+        run_id = base_id
+        counter = 1
         while True:
-            run_id = f'{stamp}-{uuid4().hex[:8]}'
             rundir = output / cell / 'runs' / run_id / 'rundir'
             if not rundir.parent.exists():
                 return run_id, rundir
+            run_id = f'{base_id}-{counter}'
+            counter += 1
 
 
 _steps = Steps()
