@@ -4,6 +4,7 @@
 # SECTION 1: Standard, Third-Party, and Internal Module Imports
 # ==============================================================================
 from hashlib import sha256
+import copy
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ from ..integrations.models.llama_adapter import LlamaAdapter
 from ..integrations.models.openai_adapter import OpenAIAdapter
 from ..rag.case_learner import CaseLearner
 from ..rag.hybrid_retriever import HybridRetriever
+from .conversation_trace import ConversationTrace
 from .trace import Trace
 
 # ==============================================================================
@@ -55,6 +57,8 @@ class GraphServices:
         self.messages = []
         self.input_sources = None
         self.learner = None
+        self.drc_report = None
+        self.conversation_trace = ConversationTrace(self.rundir, self.check_output_path)
 
     # --------------------------------------------------------------------------
     # Static Validation and Checksum Utilities
@@ -144,25 +148,39 @@ class GraphServices:
             self.embedding_client = None
             self.messages = []
             return self.messages
-        self.embedding_client = LlamaAdapter(self.config)
-        self.rag = HybridRetriever(self.config.get('knowledge_dir'), self.config, embedding_client=self.embedding_client).run()
-        self.rag.migrate_legacy(self.rag.knowledge_dir / 'knowledge_db.json')
-        if self.config.get('reference_dir'):
-            self.rag.index_documents(self.config['reference_dir'])
-        self.rag.index_rule_decks(self.config.get('drc_files', []))
-        context = self.drc_context(self.layout.drc_data)
+        self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
+        return self.messages
+
+    def build_drc_context(self):
+        """Read DRC and layout data, then retrieve related knowledge for the graph."""
+        report = self.layout.read_drc()
+        self.drc_report = report
+        if self.rag is None:
+            self.embedding_client = LlamaAdapter(self.config)
+            self.rag = HybridRetriever(self.config.get('knowledge_dir'), self.config, embedding_client=self.embedding_client).run()
+            self.rag.migrate_legacy(self.rag.knowledge_dir / 'knowledge_db.json')
+            if self.config.get('reference_dir'):
+                self.rag.index_documents(self.config['reference_dir'])
+            self.rag.index_rule_decks(self.config.get('drc_files', []))
+        context = self.drc_context(report)
         rules = context.get('rules') or [{'name': key} for key in context.get('violations_by_rule', {})]
         names = [rule['name'] for rule in rules if rule.get('name')]
         query = ' '.join(names + [str(rule.get('description', '')) for rule in rules])
         references = self.rag.retrieve(query, names, self.config['rag_limit']) if query else []
-        payload = {'gds': self.layout.gds_data}
-        if self.config.get('goal'):
-            payload['goal'] = self.config['goal']
-        self.messages = [
-            {'role': 'system', 'content': self.system_prompt(references)},
-            {'role': 'user', 'content': json.dumps(payload)},
+        compact = {key: report[key] for key in ('top_cell', 'dbu_per_user_unit', 'total_violations', 'clean') if key in report}
+        compact['rules'] = [
+            {key: rule[key] for key in ('name', 'description', 'reported_count', 'total_count', 'geometry') if key in rule}
+            for rule in context.get('rules', [])
         ]
-        return self.messages
+        compact['omitted_clean_rule_count'] = context.get('omitted_clean_rule_count', 0)
+        path = Path(self.config.get('constraints_file') or Path(__file__).resolve().parents[1] / 'knowledge' / 'constraints.json')
+        constraints = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(constraints, list) or any(not isinstance(item, str) or not item.strip() for item in constraints):
+            raise ValueError('Knowledge constraints must be a list of non-empty strings')
+        goal = self.config.get('goal', '')
+        if constraints:
+            goal = '\n'.join([goal, 'Constraints:', *(f'- {item}' for item in constraints)]).strip()
+        return {'drc': compact, 'knowledge': {'references': references, 'constraints': constraints}, 'goal': goal}
 
     # --------------------------------------------------------------------------
     # DRC and Layout Operations
@@ -206,7 +224,30 @@ class GraphServices:
     # --------------------------------------------------------------------------
     def chat(self, messages, specs, response_schema=None):
         schema = self.workflow.response_schema if response_schema is None else response_schema
-        return self.client.chat(messages, specs, schema)
+        req_id = self.conversation_trace.allocate_request_id()
+        self.conversation_trace.append({
+            'type': 'model_request',
+            'request_id': req_id,
+            'messages': copy.deepcopy(messages),
+            'tools': copy.deepcopy(specs),
+            'response_schema': copy.deepcopy(schema),
+        })
+        try:
+            response = self.client.chat(messages, specs, schema)
+        except Exception as exc:
+            self.conversation_trace.append({
+                'type': 'model_error',
+                'request_id': req_id,
+                'error_type': type(exc).__name__,
+                'error_message': str(exc),
+            })
+            raise
+        self.conversation_trace.append({
+            'type': 'model_response',
+            'request_id': req_id,
+            'message': copy.deepcopy(response),
+        })
+        return response
 
     def interpret_feedback(self, feedback, state):
         if self.workflow.feedback_schema is None:
