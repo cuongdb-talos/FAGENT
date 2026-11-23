@@ -37,7 +37,7 @@ class GraphBuilder:
                 routes.extend((node, nodes.node_name(step.continue_to)))
             if step.action == 'agent':
                 tool_node = f'{step.id}--tools'
-                routes.append(tool_node)
+                routes.extend((node, tool_node))
                 graph.add_node(tool_node, partial(nodes.run_task_step, step=step, tools=True))
                 graph.add_conditional_edges(tool_node, partial(nodes.route_task_tools, step=step), [END, node])
             graph.add_conditional_edges(node, partial(nodes.route_task_step, step=step), list(dict.fromkeys(routes)))

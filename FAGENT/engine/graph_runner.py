@@ -145,6 +145,9 @@ class GraphRunner:
         if task_state := state.get('task_state'):
             self.result['step_outputs'] = {key: value for key, value in task_state.items() if key not in ('messages', 'result')}
         self.result['candidate_digest'] = state.get('candidate_digest')
+        self.result['checklist_digest'] = state.get('checklist_digest')
+        if state.get('checklist') is not None:
+            self.result['checklist'] = state.get('checklist')
         self.result['validation'] = state.get('validation')
         self.result['review'] = state.get('review') or {'authorized': False}
         self.messages = state.get('messages', [])

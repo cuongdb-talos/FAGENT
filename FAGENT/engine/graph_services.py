@@ -204,8 +204,9 @@ class GraphServices:
     # --------------------------------------------------------------------------
     # LLM Interaction and Review Feedback Interpretation
     # --------------------------------------------------------------------------
-    def chat(self, messages, specs):
-        return self.client.chat(messages, specs, self.workflow.response_schema)
+    def chat(self, messages, specs, response_schema=None):
+        schema = self.workflow.response_schema if response_schema is None else response_schema
+        return self.client.chat(messages, specs, schema)
 
     def interpret_feedback(self, feedback, state):
         if self.workflow.feedback_schema is None:

@@ -96,7 +96,7 @@ class WorkflowLoader:
             if action != 'agent' and 'tools' in step:
                 raise ValueError(f'{identifier}: only agent can declare tools')
             bindings = step.get('tools', []) if action == 'agent' else []
-            if action not in {'agent', 'review'}:
+            if action not in {'agent', 'plan', 'review'}:
                 bindings = [action]
             for reference in bindings:
                 match = re.fullmatch(r'([a-zA-Z_][a-zA-Z0-9_]*):([a-zA-Z_][a-zA-Z0-9_]*)', reference)
@@ -141,7 +141,16 @@ class WorkflowLoader:
             try:
                 function = None
                 tools = {}
-                if step['action'] not in {'agent', 'review'}:
+                step_schema = None
+                step_prompt = None
+                if 'schema' in step:
+                    schema_text = self._read_local(directory, step['schema'], sources).decode()
+                    step_schema = self._parse_object_schema(schema_text, f'{step["id"]}: step schema must be an object schema')
+                if 'prompt' in step:
+                    step_prompt = self._read_local(directory, step['prompt'], sources).decode()
+                if step['action'] == 'plan' and (step_schema is None or not step_prompt):
+                    raise ValueError('Plan step requires step-local prompt and schema')
+                if step['action'] not in {'agent', 'plan', 'review'}:
                     function = self._bind(directory, step['action'], references, sources, modules)
                     self._check_signature(function)
                 for reference in step.get('tools', ()):
@@ -159,7 +168,12 @@ class WorkflowLoader:
                         raise ValueError(f'{reference}: {exc}') from exc
                     tools[name] = metadata
                 resolved.append(SimpleNamespace(**{
-                    **step, 'continue_to': step.get('continue'), 'function': function, 'tools': tools,
+                    **step,
+                    'continue_to': step.get('continue'),
+                    'function': function,
+                    'tools': tools,
+                    'schema': step_schema,
+                    'prompt': step_prompt,
                 }))
             except (ValueError, TypeError, ImportError, SyntaxError) as exc:
                 raise ValueError(f'{step["id"]}: {exc}') from exc

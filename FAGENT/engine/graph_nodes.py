@@ -4,6 +4,7 @@
 # SECTION 1: Standard and Third-Party Library Imports
 # ==============================================================================
 import json
+from pathlib import Path
 import sys
 
 import jsonschema
@@ -16,6 +17,7 @@ from langgraph.types import interrupt
 # ==============================================================================
 from .fagent_state import FagentState
 from .task_contracts import TaskContext, ToolResult
+from ..tasks.drc.checklist import Checklist
 
 
 # ==============================================================================
@@ -55,6 +57,8 @@ class GraphNodes:
                 raise ValueError(f'Missing inputs: {", ".join(sorted(missing))}')
             if tools:
                 return self.execute_tools(context, step)
+            if step.action == 'plan':
+                return self.execute_plan(context, step)
             if step.action == 'agent':
                 return self.execute_agent(context, step)
             if step.action == 'review':
@@ -80,6 +84,36 @@ class GraphNodes:
         json.dumps(updates, allow_nan=False)
         return updates
 
+    def execute_plan(self, context, step):
+        """Request a structured violation plan and build the run-scoped checklist."""
+        state = context.state
+        messages = list(state.get('messages', []))
+        report = state.get('report')
+        if not isinstance(report, dict):
+            raise ValueError('DRC report must be read before planning')
+        goal = self.services.config.get('goal', '') if hasattr(self.services, 'config') else ''
+        plan_request = [
+            *messages,
+            {'role': 'user', 'content': json.dumps({'plan_instruction': step.prompt, 'goal': goal, 'drc': report})},
+        ]
+        message = self.services.chat(plan_request, [], response_schema=step.schema)
+        if message.get('tool_calls'):
+            raise ValueError('Plan step cannot invoke tools')
+        plan = json.loads(message['content'])
+        jsonschema.Draft202012Validator(step.schema).validate(plan)
+        checklist = Checklist().run(report, plan['tasks'], goal=goal)
+        snapshot = checklist.read()
+        checklist_path = Path(self.services.rundir) / 'checklist.json'
+        self.services.check_output_path(checklist_path)
+        checklist.save(checklist_path)
+        return {
+            'messages': [*messages, message],
+            'checklist': snapshot,
+            'checklist_digest': snapshot['digest'],
+            'checklist_path': str(checklist_path),
+            'iteration': 0,
+        }
+
     def execute_agent(self, context, step):
         """Request a tool call or schema-valid response."""
         state = context.state
@@ -88,13 +122,38 @@ class GraphNodes:
             reason = f'{context.task}/{step.id}: iteration limit reached'
             print(f'[ERROR] {reason}', file=sys.stderr)
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
-        messages = state.get('messages', [])
-        message = self.services.chat(messages, [spec.model_spec(name) for name, spec in step.tools.items()])
+        messages = list(state.get('messages', []))
+        request_messages = list(messages)
+        if state.get('checklist') is not None:
+            goal = self.services.config.get('goal', '') if hasattr(self.services, 'config') else ''
+            request_messages.append({
+                'role': 'user',
+                'content': json.dumps({'current_checklist': state['checklist'], 'goal': goal}),
+            })
+        message = self.services.chat(
+            request_messages,
+            [spec.model_spec(name) for name, spec in step.tools.items()],
+            response_schema=getattr(step, 'schema', None),
+        )
         calls = message.get('tool_calls')
         updates = {'messages': [*messages, message], 'iteration': iteration + 1, 'pending_tools': bool(calls)}
         if not calls:
             response = json.loads(message['content'])
-            jsonschema.Draft202012Validator(self.services.workflow.response_schema).validate(response)
+            schema = getattr(step, 'schema', None) or self.services.workflow.response_schema
+            jsonschema.Draft202012Validator(schema).validate(response)
+            if state.get('checklist') is not None and response.get('decision') == 'completed':
+                summary = Checklist.from_dict(state['checklist']).summary()
+                counts = summary['counts']
+                if counts['pending'] > 0 or counts['in_progress'] > 0 or summary['stale'] > 0:
+                    updates['messages'].append({
+                        'role': 'user',
+                        'content': json.dumps({
+                            'error': 'Cannot complete repair while pending, in_progress, or stale checklist tasks remain.',
+                            'checklist_summary': summary,
+                        }),
+                    })
+                    updates['response'] = None
+                    return updates
             updates.update(response=response, iteration=0)
         return updates
 
@@ -148,6 +207,8 @@ class GraphNodes:
             destination = 'END'
         elif state.get('pending_tools'):
             destination = f'{step.id}--tools'
+        elif step.action == 'agent' and state.get('response') is None:
+            destination = self.node_name(step.id)
         elif step.action == 'review':
             decision = state['review']['decision']
             if decision == 'unclear':
@@ -180,8 +241,9 @@ class GraphNodes:
             'reason': state.get('repair_error') or validation.get('reason') or 'No verified tool evidence',
             'response': response,
             'candidate': state.get('candidate_path'),
+            'checklist': state.get('checklist'),
         }
-        feedback = interrupt({'result': result, 'validation': validation})
+        feedback = interrupt({'result': result, 'validation': validation, 'checklist': state.get('checklist')})
         envelope = feedback if isinstance(feedback, dict) else {'feedback': feedback}
         feedback = envelope.get('feedback')
         messages = list(state.get('messages', []))
