@@ -3,6 +3,7 @@
 # === SECTION 1: Imports ===
 from pathlib import Path
 
+from FAGENT.capabilities.layout.cover_check import CoverCheck
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
 
@@ -37,8 +38,30 @@ class DrcTools:
             return ToolResult({"error": type(exc).__name__}, {"candidate_path": None, "candidate_digest": None, "validation": None})
         return ToolResult(result, {"candidate_path": str(candidate), "candidate_digest": digest, "validation": None})
 
+    def check_cover(context, cell_name, inner_id, outer_id, minimum):
+        """Evaluate geometric enclosure between two direct polygons identified by stable IDs."""
+        layout = context.services.layout
+        try:
+            layout.get_cell(cell_name)
+            inner_poly = layout.polygon_ids.resolve(cell_name, inner_id)
+            outer_poly = layout.polygon_ids.resolve(cell_name, outer_id)
+            precision = float(layout.library.precision) / float(layout.library.unit)
+            result = CoverCheck().run(inner_poly, outer_poly, minimum=minimum, precision=precision)
+        except (OSError, ValueError, RuntimeError, TypeError) as exc:
+            result = {
+                "status": "unknown",
+                "minimum": minimum,
+                "measured_distance": None,
+                "units": "gds_user_units",
+                "violations": [],
+                "reason": str(exc),
+            }
+        payload = {"cell": cell_name, "inner_id": inner_id, "outer_id": outer_id, **result}
+        return ToolResult(payload, {})
+
     run = staticmethod(run)
     replace = staticmethod(replace)
+    check_cover = staticmethod(check_cover)
 
 
 read_gds = DrcTools.run
@@ -74,6 +97,23 @@ replace_polygon.task_tool = ToolSpec(
             },
         },
         "required": ["cell_name", "polygon_id", "points"],
+        "additionalProperties": False,
+    },
+)
+
+check_cover = DrcTools.check_cover
+check_cover.task_tool = ToolSpec(
+    function=check_cover,
+    description="Check geometric enclosure between an inner polygon and an outer covering polygon by stable polygon_id in GDS user units.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "cell_name": {"type": "string"},
+            "inner_id": {"type": "string"},
+            "outer_id": {"type": "string"},
+            "minimum": {"type": "number"},
+        },
+        "required": ["cell_name", "inner_id", "outer_id", "minimum"],
         "additionalProperties": False,
     },
 )

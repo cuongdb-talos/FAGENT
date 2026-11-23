@@ -1,5 +1,6 @@
 # Direct dependencies for FAGENT (Python 3.10.13 and newer).
 gdstk>=0.9.59,<1.0
+shapely>=2.0,<3.0
 numpy>=1.24,<2.3
 llama-cpp-python>=0.3.36,<0.4
 openai>=1.0,<4.0
