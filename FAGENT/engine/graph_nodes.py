@@ -6,6 +6,7 @@
 import json
 from pathlib import Path
 import sys
+import traceback
 
 import jsonschema
 from langgraph.graph import END
@@ -70,10 +71,13 @@ class GraphNodes:
                 self.trace.node_end(node, step.id, "waiting")
             raise
         except Exception as exc:
-            reason = f'{workflow.task}/{step.id}: {type(exc).__name__}'
+            detail = str(exc).strip()
+            msg = f': {detail}' if detail else ''
+            reason = f'{workflow.task}/{step.id}: {type(exc).__name__}{msg}'
             if missing:
                 reason += f' (missing inputs: {", ".join(sorted(missing))})'
             print(f'[ERROR] {reason}', file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
 
     def execute_step(self, context, step):
@@ -188,8 +192,11 @@ class GraphNodes:
                     payload = json.dumps(result, allow_nan=False)
             except Exception as exc:
                 tool_name = name if isinstance(name, str) and name in step.tools else 'unknown tool'
-                error = f'{context.task}/{step.id}/{tool_name}: {type(exc).__name__}'
+                detail = str(exc).strip()
+                msg = f': {detail}' if detail else ''
+                error = f'{context.task}/{step.id}/{tool_name}: {type(exc).__name__}{msg}'
                 print(f'[ERROR] {error}', file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
                 payload = json.dumps({'error': error})
             messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
         return {**updates, 'messages': messages, 'pending_tools': False}
