@@ -262,6 +262,20 @@ class TestDrcNodePromptIsolation:
         assert 'planning agent' not in repair_text.lower()
         assert 'plan_instruction' not in repair_text
 
+    def test_dynamic_prompt_resolution_by_node_name(self, tmp_path: Path):
+        """Verify prompt is dynamically resolved by node name without hard-coding task in Graph."""
+        root = Path('FAGENT/tasks').resolve()
+        workflow = WorkflowLoader(root / 'drc' / 'workflow.yaml', root).run()
+
+        # Step 'repair' gets prompt matching its name 'repair'
+        repair_step = next(s for s in workflow.steps if s.id == 'repair')
+        plan_step = next(s for s in workflow.steps if s.id == 'plan')
+
+        assert repair_step.prompt is not None
+        assert 'repair agent' in repair_step.prompt.lower()
+        assert plan_step.prompt is not None
+        assert 'planning agent' in plan_step.prompt.lower()
+
     def test_non_drc_workflow_preserves_prompt_behavior(self, tmp_path: Path):
         """Verify non-DRC workflows preserve standard system prompt composition with prompts and protocol."""
         workflow = SimpleNamespace(

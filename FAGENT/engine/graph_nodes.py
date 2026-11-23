@@ -128,9 +128,10 @@ class GraphNodes:
         if not isinstance(report, dict):
             raise ValueError('DRC report must be read before planning')
         goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
+        instruction = getattr(step, 'prompt', None) or self.services.node_prompt(step)
         plan_request = [
             *messages,
-            {'role': 'user', 'content': json.dumps({'plan_instruction': step.prompt, 'goal': goal})},
+            {'role': 'user', 'content': json.dumps({f'{step.id}_instruction': instruction, 'goal': goal})},
         ]
         message = self.services.chat(plan_request, [], response_schema=step.schema)
         self.last_conversation = [*plan_request, message]
@@ -161,22 +162,18 @@ class GraphNodes:
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
         messages = list(state.get('messages', []))
         request_messages = list(messages)
-        if self.services.workflow and getattr(self.services.workflow, 'task', None) == 'drc':
-            repair_instruction = self.services.repair_prompt()
-            agent_payload = {'repair_instruction': repair_instruction}
-            if state.get('checklist') is not None:
-                goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
-                agent_payload['current_checklist'] = state['checklist']
-                agent_payload['goal'] = goal
+        node_prompt = self.services.node_prompt(step)
+        agent_payload = {}
+        if node_prompt:
+            agent_payload[f'{step.id}_instruction'] = node_prompt
+        if state.get('checklist') is not None:
+            goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
+            agent_payload['current_checklist'] = state['checklist']
+            agent_payload['goal'] = goal
+        if agent_payload:
             request_messages.append({
                 'role': 'user',
                 'content': json.dumps(agent_payload),
-            })
-        elif state.get('checklist') is not None:
-            goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
-            request_messages.append({
-                'role': 'user',
-                'content': json.dumps({'current_checklist': state['checklist'], 'goal': goal}),
             })
         message = self.services.chat(
             request_messages,

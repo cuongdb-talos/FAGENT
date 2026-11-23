@@ -34,7 +34,7 @@ class Fagent:
     TASK_ROOT = PACKAGE_DIR / 'tasks'
     PROMPT_MIGRATION = {
         'knowledge/prompts/drc_site.md': 'knowledge/templates/prompts/drc_site.md',
-        'knowledge/prompts/drc.md': 'tasks/drc/prompts/drc.md',
+        'knowledge/prompts/drc.md': 'tasks/drc/prompts/repair.md',
         'knowledge/prompts/lvs.md': 'tasks/lvs/prompts/lvs.md',
         'knowledge/prompts/protocol.md': 'knowledge/templates/prompts/protocol.md',
         'knowledge/prompts/review.md': 'knowledge/templates/prompts/review.md',

@@ -31,7 +31,7 @@ class Steps:
         drc_context = context.services.build_drc_context()
         goal = context.services.config.get('goal', '') if hasattr(context.services, 'config') else ''
         constraints = drc_context.get('knowledge', {}).get('constraints', [])
-        sys_content = context.services.drc_system_prompt(goal=goal, constraints=constraints)
+        sys_content = context.services.build_system_message(goal=goal, constraints=constraints)
 
         current_messages = list(context.state.get('messages', []))
         if current_messages and current_messages[0].get('role') == 'system':

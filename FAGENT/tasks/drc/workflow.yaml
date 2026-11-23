@@ -1,7 +1,7 @@
 task: drc
 version: 1
 prompts:
-- prompts/drc.md
+- prompts/repair.md
 protocol: knowledge/templates/prompts/protocol.md
 schema: schemas/drc.json
 review_prompt: knowledge/templates/prompts/review.md

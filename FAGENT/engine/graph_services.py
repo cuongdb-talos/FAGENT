@@ -118,7 +118,7 @@ class GraphServices:
             texts.append(self.workflow.protocol_text)
         return '\n\n'.join(texts)
 
-    def drc_system_prompt(self, goal=None, constraints=None):
+    def build_system_message(self, goal=None, constraints=None):
         """Construct system message consisting only of configured goal and constraints."""
         cfg = getattr(self, 'config', {}) or {}
         if goal is None:
@@ -146,18 +146,25 @@ class GraphServices:
                 parts.append('Constraints:\n' + '\n'.join(f'- {item}' for item in cleaned))
         return '\n\n'.join(parts).strip()
 
-    def repair_prompt(self):
-        """Build node-local instruction for DRC repair agent."""
+    drc_system_prompt = build_system_message
+
+    def node_prompt(self, step=None):
+        """Build node-local instruction including site prompt and protocol."""
         texts = []
-        wf = getattr(self, 'workflow', None)
-        if wf and getattr(wf, 'prompt_text', None):
-            texts.extend(wf.prompt_text)
+        step_prompt = getattr(step, 'prompt', None) if step else None
+        if step_prompt:
+            texts.append(step_prompt.strip())
+        elif self.workflow and getattr(self.workflow, 'prompt_text', None):
+            texts.extend(self.workflow.prompt_text)
         custom = getattr(self, 'custom_prompt', None)
         if custom:
             texts.append(custom.strip())
-        if wf and getattr(wf, 'protocol_text', None):
-            texts.append(wf.protocol_text.strip())
+        protocol = getattr(self.workflow, 'protocol_text', None) if self.workflow else None
+        if protocol:
+            texts.append(protocol.strip())
         return '\n\n'.join(texts).strip()
+
+    repair_prompt = node_prompt
 
     # --------------------------------------------------------------------------
     # Environment and Subsystem Preparation
@@ -205,8 +212,8 @@ class GraphServices:
                         outputs={'input_sources': self.input_sources},
                     )
                 return self.messages
-            if self.workflow.task == 'drc':
-                self.messages = [{'role': 'system', 'content': self.drc_system_prompt()}]
+            if self.workflow.layout_services:
+                self.messages = [{'role': 'system', 'content': self.build_system_message()}]
             else:
                 self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
             if op_id and hasattr(self, 'conversation_trace') and self.conversation_trace:

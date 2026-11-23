@@ -114,7 +114,12 @@ class WorkflowLoader:
         if 'schema' in data:
             schema_text = self._read_local(directory, data['schema'], sources).decode()
             response_schema = self._parse_object_schema(schema_text, 'A response object schema is required')
-        if any(step['action'] == 'agent' for step in steps) and (not prompts or response_schema is None):
+        agent_steps = [s for s in steps if s.get('action') == 'agent']
+        has_prompts = bool(prompts) or all(
+            s.get('prompt') or (directory / 'prompts' / f'{s["id"]}.md').is_file()
+            for s in agent_steps
+        )
+        if agent_steps and (not has_prompts or response_schema is None):
             raise ValueError('Agent steps require prompts and a response schema')
 
         shared = {}
@@ -148,6 +153,8 @@ class WorkflowLoader:
                     step_schema = self._parse_object_schema(schema_text, f'{step["id"]}: step schema must be an object schema')
                 if 'prompt' in step:
                     step_prompt = self._read_local(directory, step['prompt'], sources).decode()
+                elif (directory / 'prompts' / f'{step["id"]}.md').is_file():
+                    step_prompt = self._read_local(directory, f'prompts/{step["id"]}.md', sources).decode()
                 if step['action'] == 'plan' and (step_schema is None or not step_prompt):
                     raise ValueError('Plan step requires step-local prompt and schema')
                 if step['action'] not in {'agent', 'plan', 'review'}:
