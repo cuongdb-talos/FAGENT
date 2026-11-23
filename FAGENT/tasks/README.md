@@ -67,3 +67,24 @@ grep -nE '^(task|inputs|steps|prompts|schema):' FAGENT/tasks/my_task/workflow.ya
   chú thích khối `human_review`. `continue` chỉ bước chạy lại và `next`
   chỉ đích khi kết thúc review. Nếu tùy chỉnh cách diễn giải phản hồi bằng
   model, cấu hình cả `review_prompt` và `review_schema`.
+
+## Quy trình DRC Checklist và Định danh Polygon
+
+Task DRC áp dụng kiến trúc quản lý sửa lỗi hướng checklist với các đặc điểm:
+
+1. **Cách ly lượt chạy (Run Isolation):**
+   - Mỗi cell được chạy trong một thư mục độc lập: `output/<cell>/runs/<run_id>/rundir/`.
+   - Giữ nguyên toàn bộ báo cáo vi phạm DRC, thứ tự và số lượng vi phạm gốc (kể cả rule không có hình học).
+2. **Định danh Polygon ổn định (`polygon_id`):**
+   - Mỗi polygon trực tiếp có thể chỉnh sửa được gán ID ổn định dạng `<cell_name>:poly:<index>`.
+   - ID được duy trì qua các phép chỉnh sửa bằng `replace_polygon(cell_name, polygon_id, points)` và bảo vệ toàn vẹn bằng SHA-256 digest của `candidate.gds`.
+3. **Kiểm tra hình học Enclosure (`check_cover`):**
+   - Sử dụng engine GEOS/Shapely để tính toán khoảng cách bao phủ chính xác giữa polygon inner và outer theo user units của GDS.
+   - Báo cáo chi tiết các đoạn mép vi phạm và độ thiếu hụt (`shortage`). Trả về trạng thái `unknown` khi hình học phức tạp hoặc không xác định.
+4. **Quản lý Checklist trạng thái vi phạm:**
+   - Checklist lưu trữ tại `checklist.json` trong rundir với các trạng thái: `pending`, `in_progress`, `pass`, `skipped`, `unresolved`.
+   - Mục tiêu cấu hình (`goal`) cho phép tự động bỏ qua (skip) các vi phạm được loại trừ (ví dụ density).
+   - Khi bất kỳ polygon nào bị thay đổi, các task đã `pass` phụ thuộc vào polygon đó sẽ tự động chuyển sang trạng thái `stale` (cần đánh giá lại).
+5. **Tính chân thực của xác minh (Verification Truthfulness):**
+   - Đánh giá `pass` trên checklist là nhận định hình học của agent, **không phải kết quả DRC Calibre chính thức**.
+   - Báo cáo kết quả cuối cùng giữ trạng thái `incomplete` trừ khi có bằng chứng chạy DRC thực tế hỗ trợ.
