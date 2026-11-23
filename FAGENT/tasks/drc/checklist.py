@@ -33,9 +33,9 @@ class Checklist:
             raise ValueError('proposed_tasks must be a list')
 
         expected_items = self._extract_report_items(report)
-        matched, unresolved_missing = self._reconcile(expected_items, proposed_tasks, goal)
+        reconciled = self._reconcile(expected_items, proposed_tasks, goal)
         tasks = []
-        for idx, item in enumerate(matched + unresolved_missing, start=1):
+        for idx, item in enumerate(reconciled, start=1):
             tasks.append({
                 'task_id': f'task-{idx}',
                 'rule': item['rule'],
@@ -261,56 +261,72 @@ class Checklist:
         return items
 
     def _reconcile(self, expected_items: list, proposed_tasks: list, goal: str):
-        """Match proposed tasks 1-to-1 against report items and enforce skip/unresolved rules."""
-        remaining = list(expected_items)
-        matched = []
+        """Match proposed tasks 1-to-1 against report items and preserve report order."""
+        available_indices = list(range(len(expected_items)))
+        matched_by_idx = {}
         for task in proposed_tasks:
             if not isinstance(task, dict):
                 raise ValueError('Each proposed task must be an object')
             rule = task.get('rule')
             vid = task.get('violation_id')
             occ = task.get('occurrence')
-            idx = self._find_match_index(remaining, rule, vid, occ)
-            if idx is None:
+            match_pos = None
+            for pos, idx in enumerate(available_indices):
+                exp = expected_items[idx]
+                if exp['rule'] == rule and exp['violation_id'] == vid:
+                    if occ is None or exp['occurrence'] == occ:
+                        match_pos = pos
+                        break
+            if match_pos is None:
                 raise ValueError(f'Proposed task does not match any remaining report occurrence: {rule} ({vid})')
-            expected = remaining.pop(idx)
+            target_idx = available_indices.pop(match_pos)
+
             status = task.get('status', 'pending')
             reason = str(task.get('reason') or '')
             work = str(task.get('work') or f'Inspect {rule}')
-            if expected['missing_geometry']:
+            if expected_items[target_idx]['missing_geometry']:
                 status = 'unresolved'
-                reason = reason or expected['missing_reason']
+                reason = reason or expected_items[target_idx]['missing_reason']
             elif status == 'skipped':
                 if not self._skip_allowed(rule, reason, goal):
                     raise ValueError(f'Skip not permitted by configured goal for rule {rule}')
             elif status not in ('pending', 'unresolved'):
                 raise ValueError(f'Invalid initial plan status {status!r} for rule {rule}')
-            matched.append({
-                'rule': expected['rule'],
-                'violation_id': expected['violation_id'],
-                'occurrence': expected['occurrence'],
+            matched_by_idx[target_idx] = {
+                'rule': expected_items[target_idx]['rule'],
+                'violation_id': expected_items[target_idx]['violation_id'],
+                'occurrence': expected_items[target_idx]['occurrence'],
                 'work': work,
                 'status': status,
                 'reason': reason,
                 'polygon_ids': list(task.get('polygon_ids') or []),
                 'evidence': [],
-            })
+            }
 
-        unresolved_missing = []
-        for expected in remaining:
-            if not expected['missing_geometry']:
-                raise ValueError(f'Plan does not cover report violation {expected["rule"]} id={expected["violation_id"]}')
-            unresolved_missing.append({
-                'rule': expected['rule'],
-                'violation_id': None,
-                'occurrence': expected['occurrence'],
-                'work': f'Investigate missing geometry for {expected["rule"]}',
-                'status': 'unresolved',
-                'reason': expected['missing_reason'],
-                'polygon_ids': [],
-                'evidence': [],
-            })
-        return matched, unresolved_missing
+        reconciled = []
+        for idx, expected in enumerate(expected_items):
+            if idx in matched_by_idx:
+                reconciled.append(matched_by_idx[idx])
+            else:
+                if expected['missing_geometry']:
+                    status = 'unresolved'
+                    reason = expected['missing_reason']
+                    work = f'Investigate missing geometry for {expected["rule"]}'
+                else:
+                    status = 'unresolved'
+                    reason = 'No plan supplied by model for this reported violation'
+                    work = f'Inspect {expected["rule"]}'
+                reconciled.append({
+                    'rule': expected['rule'],
+                    'violation_id': expected['violation_id'],
+                    'occurrence': expected['occurrence'],
+                    'work': work,
+                    'status': status,
+                    'reason': reason,
+                    'polygon_ids': [],
+                    'evidence': [],
+                })
+        return reconciled
 
     def _find_match_index(self, remaining: list, rule: str, vid, occ):
         """Find matching expected item index by rule, violation_id, and optional occurrence."""

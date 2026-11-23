@@ -163,3 +163,97 @@ def test_checklist_tools_roundtrip(tmp_path):
     )
     assert upd_res.updates['checklist_digest'] != state['checklist_digest']
     assert (tmp_path / 'checklist.json').is_file()
+
+
+def test_checklist_reconciles_partial_and_empty_model_suggestions():
+    # 1. Two-ID rule with only the first task proposed
+    report_two = {
+        'rules': [
+            {
+                'name': 'R_EN',
+                'reported_count': 2,
+                'total_count': 2,
+                'geometry': [{'id': 1}, {'id': 2}],
+            }
+        ]
+    }
+    proposed_partial = [
+        {'rule': 'R_EN', 'violation_id': 1, 'occurrence': 0, 'work': 'Fix first', 'status': 'pending', 'reason': ''}
+    ]
+    cl_partial = Checklist().run(report_two, proposed_partial)
+    tasks_partial = cl_partial.read()['tasks']
+    assert len(tasks_partial) == 2
+    assert tasks_partial[0]['task_id'] == 'task-1'
+    assert tasks_partial[0]['rule'] == 'R_EN'
+    assert tasks_partial[0]['violation_id'] == 1
+    assert tasks_partial[0]['status'] == 'pending'
+    assert tasks_partial[0]['work'] == 'Fix first'
+    assert tasks_partial[0]['evidence'] == []
+    assert tasks_partial[0]['stale'] is False
+
+    assert tasks_partial[1]['task_id'] == 'task-2'
+    assert tasks_partial[1]['rule'] == 'R_EN'
+    assert tasks_partial[1]['violation_id'] == 2
+    assert tasks_partial[1]['status'] == 'unresolved'
+    assert tasks_partial[1]['reason'] != ''
+    assert tasks_partial[1]['evidence'] == []
+    assert tasks_partial[1]['stale'] is False
+
+    # 2. Empty plan -> all report violations retained as unresolved in report order
+    cl_empty = Checklist().run(report_two, [])
+    tasks_empty = cl_empty.read()['tasks']
+    assert len(tasks_empty) == 2
+    assert [t['status'] for t in tasks_empty] == ['unresolved', 'unresolved']
+    assert [t['violation_id'] for t in tasks_empty] == [1, 2]
+
+    # 3. Duplicate IDs distinguished by occurrence
+    report_dup = {
+        'rules': [
+            {
+                'name': 'R_DUP',
+                'reported_count': 2,
+                'total_count': 2,
+                'geometry': [{'id': 1}, {'id': 1}],
+            }
+        ]
+    }
+    proposed_occ1 = [
+        {'rule': 'R_DUP', 'violation_id': 1, 'occurrence': 1, 'work': 'Fix second occ', 'status': 'pending', 'reason': ''}
+    ]
+    cl_dup = Checklist().run(report_dup, proposed_occ1)
+    tasks_dup = cl_dup.read()['tasks']
+    assert len(tasks_dup) == 2
+    assert tasks_dup[0]['occurrence'] == 0
+    assert tasks_dup[0]['status'] == 'unresolved'
+    assert tasks_dup[1]['occurrence'] == 1
+    assert tasks_dup[1]['status'] == 'pending'
+    assert tasks_dup[1]['work'] == 'Fix second occ'
+
+    # 4. Summary-only input (counts without geometry)
+    report_summary = {'violations_by_rule': {'R_SUM': 2}}
+    cl_sum = Checklist().run(report_summary, [])
+    tasks_sum = cl_sum.read()['tasks']
+    assert len(tasks_sum) == 2
+    assert all(t['status'] == 'unresolved' for t in tasks_sum)
+    assert all(t['violation_id'] is None for t in tasks_sum)
+
+    # 5. Invalid proposals: unknown proposal, duplicate proposal, unauthorized skip
+    with pytest.raises(ValueError, match='does not match'):
+        Checklist().run(report_two, [{'rule': 'R_NONEXISTENT', 'violation_id': 1, 'occurrence': 0, 'work': 'w'}])
+
+    with pytest.raises(ValueError, match='does not match'):
+        Checklist().run(report_two, [
+            {'rule': 'R_EN', 'violation_id': 1, 'occurrence': 0, 'work': 'w1'},
+            {'rule': 'R_EN', 'violation_id': 1, 'occurrence': 0, 'work': 'w2'},
+        ])
+
+    with pytest.raises(ValueError, match='Skip not permitted'):
+        Checklist().run(report_two, [
+            {'rule': 'R_EN', 'violation_id': 1, 'occurrence': 0, 'work': 'w', 'status': 'skipped', 'reason': 'skip'}
+        ], goal='Fix all errors')
+
+    # Allowed skip with matching goal
+    cl_skip = Checklist().run(report_two, [
+        {'rule': 'R_EN', 'violation_id': 1, 'occurrence': 0, 'work': 'w', 'status': 'skipped', 'reason': 'skip R_EN'}
+    ], goal='ignore R_EN')
+    assert cl_skip.read()['tasks'][0]['status'] == 'skipped'
