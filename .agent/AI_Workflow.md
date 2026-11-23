@@ -181,5 +181,5 @@ Khi workflow bật `knowledge_review`, người dùng có thể đồng ý lưu 
 Để kiểm tra nhanh các route và tool đang bật sau khi cấu hình thay đổi:
 
 ```bash
-grep -nE '^(steps:|[[:space:]]*(- id:|action:|next:|continue:|tools:|knowledge_review:|layout_services:))' FAGENT/tasks/drc/workflow.yaml
+grep -nE '^(nodes:|steps:|[[:space:]]*(- id:|action:|next:|continue:|tools:|knowledge_review:|layout_services:))' FAGENT/tasks/drc/workflow.yaml
 ```

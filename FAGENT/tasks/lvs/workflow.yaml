@@ -9,7 +9,7 @@ review_schema: knowledge/templates/schemas/review.json
 inputs: []
 backend: local
 mock_pass: true
-steps:
+nodes:
 - id: read
   action: steps:read_lvs
   next: repair

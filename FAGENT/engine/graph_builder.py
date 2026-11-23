@@ -26,7 +26,7 @@ class GraphBuilder:
     def run(self):
         graph = StateGraph(FagentState)
         nodes = GraphNodes(self.services)
-        steps = self.services.workflow.steps
+        steps = getattr(self.services.workflow, 'nodes', None) or self.services.workflow.steps
         for step in steps:
             node = nodes.node_name(step.id)
             graph.add_node(node, partial(nodes.run_task_step, step=step))

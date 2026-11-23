@@ -35,7 +35,7 @@ Thư mục `rundir` cũng chứa `conversation.json` và checkpoint SQLite. Mẫ
 
 ```bash
 cp -R FAGENT/tasks/sample_task FAGENT/tasks/my_task
-grep -nE '^(task|inputs|steps|prompts|schema):' FAGENT/tasks/my_task/workflow.yaml
+grep -nE '^(task|inputs|nodes|steps|prompts|schema):' FAGENT/tasks/my_task/workflow.yaml
 ```
 
 1. Đổi `task: sample_task` thành `task: my_task` trong `workflow.yaml` và đổi

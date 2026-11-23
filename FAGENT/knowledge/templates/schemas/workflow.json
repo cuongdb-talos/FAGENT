@@ -4,8 +4,19 @@
   "required": [
     "task",
     "version",
-    "inputs",
-    "steps"
+    "inputs"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "nodes"
+      ]
+    },
+    {
+      "required": [
+        "steps"
+      ]
+    }
   ],
   "properties": {
     "task": {
@@ -34,6 +45,49 @@
     "schema": {
       "type": "string",
       "minLength": 1
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "action",
+          "next"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "action": {
+            "type": "string",
+            "minLength": 1
+          },
+          "next": {
+            "type": "string"
+          },
+          "continue": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
     },
     "steps": {
       "type": "array",

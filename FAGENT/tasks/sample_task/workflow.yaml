@@ -10,7 +10,7 @@ schema: schemas/response.json
 protocol: knowledge/templates/prompts/protocol.md
 
 # The first step is the entry point. Use END to finish the graph.
-steps:
+nodes:
   - id: normalize
     action: steps:normalize
     next: END

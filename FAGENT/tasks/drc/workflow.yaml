@@ -11,7 +11,7 @@ inputs:
 - drc
 - layer_map
 backend: local
-steps:
+nodes:
 - id: read
   action: steps:read_drc
   next: plan

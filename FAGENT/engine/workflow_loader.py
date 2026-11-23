@@ -73,7 +73,9 @@ class WorkflowLoader:
         Draft202012Validator(json.loads(definition.read_text())).validate(data)
         if data['task'] != task:
             raise ValueError(f'Task name must match directory: {task}')
-        steps = data['steps']
+        steps = data.get('nodes') or data.get('steps')
+        if not steps:
+            raise ValueError('Workflow must declare nodes')
         ids = {step['id'] for step in steps}
         if len(ids) != len(steps):
             raise ValueError('Duplicate step IDs')
@@ -188,7 +190,7 @@ class WorkflowLoader:
         for name, content in sorted(sources.items()):
             digest.update(json.dumps([name, sha256(content).hexdigest()]).encode())
         return SimpleNamespace(**{
-            **data, 'steps': tuple(resolved), 'prompt_text': prompts,
+            **data, 'nodes': tuple(resolved), 'steps': tuple(resolved), 'prompt_text': prompts,
             'response_schema': response_schema, 'digest': digest.hexdigest(),
             'prepare': prepare, 'protocol_text': shared.get('protocol', ''),
             'review_text': shared.get('review_prompt'),

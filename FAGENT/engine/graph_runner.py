@@ -92,7 +92,8 @@ class GraphRunner:
             raise ValueError(f'No checkpoint database exists in {self.rundir}')
         self.prepare_graph()
         snapshot = self.graph.get_state(self.graph_config)
-        review_ids = {GraphNodes.node_name(step.id) for step in self.services.workflow.steps if step.action == 'review'}
+        workflow_nodes = getattr(self.services.workflow, 'nodes', None) or self.services.workflow.steps
+        review_ids = {GraphNodes.node_name(step.id) for step in workflow_nodes if step.action == 'review'}
         if not snapshot.next or not set(snapshot.next) <= review_ids or not any(task.interrupts for task in snapshot.tasks):
             raise ValueError('No graph paused at review is available for this thread')
         if snapshot.values.get('identity') != self.workflow_identity():
