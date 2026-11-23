@@ -3,6 +3,8 @@
 # === SECTION 1: Imports ===
 import json
 
+from FAGENT.engine.conversation_trace import ConversationTrace
+
 
 # === SECTION 2: Steps ===
 class Steps:
@@ -47,10 +49,18 @@ class Steps:
 
     def prepare(self, task_cfg, setup, base, output, config, verbose):
         """Resolve optional LVS paths from the setup directory."""
-        for key in ('lvs_report', 'layout', 'netlist', 'deck'):
-            if value := task_cfg.get(key):
-                config[key] = str((base / value).resolve())
-        yield output / 'lvs' / 'rundir', config, task_cfg
+        rundir = output / 'lvs' / 'rundir'
+        trace = ConversationTrace(rundir)
+        op_id = trace.start_operation('preparation', {'task': 'lvs', 'config_keys': list(config.keys())})
+        try:
+            for key in ('lvs_report', 'layout', 'netlist', 'deck'):
+                if value := task_cfg.get(key):
+                    config[key] = str((base / value).resolve())
+            trace.finish_operation(op_id, 'preparation', status='completed', outputs={'rundir': str(rundir)})
+        except Exception as exc:
+            trace.finish_operation(op_id, 'preparation', status='failed', error=exc)
+            raise
+        yield rundir, config, task_cfg
 
 
 _steps = Steps()

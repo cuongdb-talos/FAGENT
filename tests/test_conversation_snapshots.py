@@ -156,8 +156,9 @@ class TestConversationSnapshots:
         data = json.loads(trace_file.read_text(encoding='utf-8'))
         assert data.get('version') == 2
         events = data.get('events', [])
-        assert len(events) == 1
-        assert events[0] == {
+        tool_results = [e for e in events if e.get('type') == 'tool_result']
+        assert len(tool_results) == 1
+        assert tool_results[0] == {
             'type': 'tool_result',
             'message': {
                 'role': 'tool',
@@ -182,11 +183,12 @@ class TestConversationSnapshots:
         data = json.loads(trace_file.read_text(encoding='utf-8'))
         assert data.get('version') == 2
         events = data.get('events', [])
-        assert len(events) == 1
-        assert events[0]['type'] == 'tool_result'
-        assert events[0]['message']['tool_call_id'] == 'call-102'
-        assert events[0]['message']['content'] == updates['messages'][-1]['content']
-        assert 'Invalid polygon ID' in events[0]['message']['content']
+        tool_results = [e for e in events if e.get('type') == 'tool_result']
+        assert len(tool_results) == 1
+        assert tool_results[0]['type'] == 'tool_result'
+        assert tool_results[0]['message']['tool_call_id'] == 'call-102'
+        assert tool_results[0]['message']['content'] == updates['messages'][-1]['content']
+        assert 'Invalid polygon ID' in tool_results[0]['message']['content']
 
     def test_invalid_agent_response_preserves_trace_and_reports_failure(self, tmp_path):
         workflow = SimpleNamespace(task='task', inputs=[], response_schema={'type': 'object', 'required': ['verdict']})
@@ -205,10 +207,11 @@ class TestConversationSnapshots:
         data = json.loads(trace_file.read_text(encoding='utf-8'))
         assert data.get('version') == 2
         events = data.get('events', [])
-        assert len(events) == 2
-        assert events[0]['type'] == 'model_request'
-        assert events[1]['type'] == 'model_response'
-        assert events[1]['message']['content'] == 'not valid json'
+        model_events = [e for e in events if e.get('type') in ('model_request', 'model_response')]
+        assert len(model_events) == 2
+        assert model_events[0]['type'] == 'model_request'
+        assert model_events[1]['type'] == 'model_response'
+        assert model_events[1]['message']['content'] == 'not valid json'
 
     def test_finish_does_not_overwrite_conversation_trace(self, tmp_path):
         workflow = SimpleNamespace(response_schema={'type': 'object'})
@@ -223,5 +226,6 @@ class TestConversationSnapshots:
 
         data = json.loads(trace_file.read_text(encoding='utf-8'))
         assert data.get('version') == 2
-        assert len(data.get('events', [])) == 1
-        assert data['events'][0]['type'] == 'tool_result'
+        tool_results = [e for e in data.get('events', []) if e.get('type') == 'tool_result']
+        assert len(tool_results) == 1
+        assert tool_results[0]['type'] == 'tool_result'

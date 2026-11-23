@@ -3,6 +3,7 @@
 # ==============================================================================
 # SECTION 1: Standard and Third-Party Library Imports
 # ==============================================================================
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
@@ -52,6 +53,13 @@ class GraphNodes:
         node = f'{step.id}--tools' if tools else self.node_name(step.id)
         if self.trace:
             self.trace.node_start(node, step.id, step.action, tools=tools)
+        trace_inst = getattr(self.services, 'conversation_trace', None)
+        node_op = None
+        if trace_inst:
+            node_op = trace_inst.start_operation(
+                'graph_node',
+                {'node': node, 'step_id': step.id, 'action': step.action, 'tools': tools},
+            )
         inputs = state.get('inputs', {})
         task_state = state.get('task_state', {})
         context = TaskContext(workflow.task, inputs, {**task_state, **state}, self.services)
@@ -60,20 +68,38 @@ class GraphNodes:
             if missing:
                 raise ValueError(f'Missing inputs: {", ".join(sorted(missing))}')
             if tools:
-                return self.execute_tools(context, step)
+                res = self.execute_tools(context, step)
+                if trace_inst and node_op:
+                    trace_inst.finish_operation(node_op, 'graph_node', status='completed')
+                return res
             if step.action == 'plan':
-                return self.execute_plan(context, step)
+                res = self.execute_plan(context, step)
+                if trace_inst and node_op:
+                    trace_inst.finish_operation(node_op, 'graph_node', status='completed')
+                return res
             if step.action == 'agent':
-                return self.execute_agent(context, step)
+                res = self.execute_agent(context, step)
+                if trace_inst and node_op:
+                    trace_inst.finish_operation(node_op, 'graph_node', status='completed')
+                return res
             if step.action == 'review':
-                return self.review(state)
+                res = self.review(state)
+                if trace_inst and node_op:
+                    trace_inst.finish_operation(node_op, 'graph_node', status='completed')
+                return res
             updates = self.execute_step(context, step)
+            if trace_inst and node_op:
+                trace_inst.finish_operation(node_op, 'graph_node', status='completed', outputs={'updates_keys': list(updates.keys())})
             return {**updates, 'task_state': {**task_state, **updates}}
         except GraphInterrupt:
             if self.trace:
                 self.trace.node_end(node, step.id, "waiting")
+            if trace_inst and node_op:
+                trace_inst.finish_operation(node_op, 'graph_node', status='waiting')
             raise
         except Exception as exc:
+            if trace_inst and node_op:
+                trace_inst.finish_operation(node_op, 'graph_node', status='failed', error=exc)
             detail = str(exc).strip()
             msg = f': {detail}' if detail else ''
             reason = f'{workflow.task}/{step.id}: {type(exc).__name__}{msg}'
@@ -179,13 +205,20 @@ class GraphNodes:
         if any(not isinstance(item, str) or not item for item in ids) or len(ids) != len(set(ids)):
             raise ValueError('Missing or duplicate tool call ID')
         updates = {}
+        trace_inst = getattr(self.services, 'conversation_trace', None)
         for call, call_id in zip(calls, ids):
             name = None
+            tool_op = None
             try:
                 name = call['function']['name']
                 arguments = call['function']['arguments']
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
+                if trace_inst:
+                    tool_op = trace_inst.start_operation(
+                        'tool_call',
+                        {'name': name, 'call_id': call_id, 'arguments': arguments},
+                    )
                 spec = step.tools[name]
                 jsonschema.Draft202012Validator(spec.parameters).validate(arguments)
                 if self.trace:
@@ -196,8 +229,12 @@ class GraphNodes:
                     payload = json.dumps(result.payload, allow_nan=False)
                     json.dumps(result.updates, allow_nan=False)
                     updates.update(result.updates)
+                    if trace_inst and tool_op:
+                        trace_inst.finish_operation(tool_op, 'tool_call', status='completed', outputs={'result': result.payload})
                 else:
                     payload = json.dumps(result, allow_nan=False)
+                    if trace_inst and tool_op:
+                        trace_inst.finish_operation(tool_op, 'tool_call', status='completed', outputs={'result': result})
             except Exception as exc:
                 tool_name = name if isinstance(name, str) and name in step.tools else 'unknown tool'
                 detail = str(exc).strip()
@@ -206,9 +243,11 @@ class GraphNodes:
                 print(f'[ERROR] {error}', file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
                 payload = json.dumps({'error': error})
+                if trace_inst and tool_op:
+                    trace_inst.finish_operation(tool_op, 'tool_call', status='failed', error=exc, outputs={'error': error})
             messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
-            if hasattr(self.services, 'conversation_trace') and self.services.conversation_trace:
-                self.services.conversation_trace.append({
+            if trace_inst:
+                trace_inst.append({
                     'type': 'tool_result',
                     'message': {'role': 'tool', 'tool_call_id': call_id, 'content': payload},
                 })
@@ -254,6 +293,15 @@ class GraphNodes:
                 self.trace.node_end(node, step, 'failed')
             else:
                 self.trace.node_end(node, step, 'completed', destination)
+        if hasattr(self.services, 'conversation_trace') and self.services.conversation_trace:
+            self.services.conversation_trace.append({
+                'type': 'route_transition',
+                'node': node,
+                'step_id': step,
+                'destination': str(destination),
+                'failed': bool(state.get('failed')),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            })
         return END if destination == 'END' else destination
 
     def review(self, state):
@@ -268,6 +316,13 @@ class GraphNodes:
             'candidate': state.get('candidate_path'),
             'checklist': state.get('checklist'),
         }
+        trace_inst = getattr(self.services, 'conversation_trace', None)
+        review_op = None
+        if trace_inst:
+            review_op = trace_inst.start_operation(
+                'human_review',
+                {'candidate': state.get('candidate_path'), 'validation': validation},
+            )
         feedback = interrupt({'result': result, 'validation': validation, 'checklist': state.get('checklist')})
         envelope = feedback if isinstance(feedback, dict) else {'feedback': feedback}
         feedback = envelope.get('feedback')
@@ -295,6 +350,13 @@ class GraphNodes:
             'storage_consent': authorized,
             'consent_source': 'human_review' if authorized else None,
         }
+        if trace_inst and review_op:
+            trace_inst.finish_operation(
+                review_op,
+                'human_review',
+                status='completed',
+                outputs={'feedback': feedback, 'decision': decision, 'authorized': authorized},
+            )
         update = {'result': result, 'messages': messages, 'review': review, 'save_requested': authorized}
         if decision == 'continue':
             update.update(iteration=0, repair_error=None, response=None)

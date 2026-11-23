@@ -101,7 +101,19 @@ class GraphRunner:
         if feedback is self.PROMPT_FOR_FEEDBACK:
             pending = next(item for task in snapshot.tasks for item in task.interrupts)
             feedback = self.read_feedback(pending.value)
-        return self.finish(self.resume_graph(snapshot.values, feedback))
+        trace_inst = getattr(self.services, 'conversation_trace', None)
+        resume_op = None
+        if trace_inst:
+            resume_op = trace_inst.start_operation('resume', {'thread_id': self.thread_id})
+        try:
+            res = self.finish(self.resume_graph(snapshot.values, feedback))
+            if trace_inst and resume_op:
+                trace_inst.finish_operation(resume_op, 'resume', status='completed')
+            return res
+        except Exception as exc:
+            if trace_inst and resume_op:
+                trace_inst.finish_operation(resume_op, 'resume', status='failed', error=exc)
+            raise
 
     def verify_candidate(self, state):
         """Check the saved layout and checklist before using a review response."""
@@ -154,16 +166,46 @@ class GraphRunner:
         self.result['validation'] = state.get('validation')
         self.result['review'] = state.get('review') or {'authorized': False}
         self.messages = state.get('messages', [])
-        artifacts = (
-            (self.rundir / 'result.json', self.result),
-        )
-        for target, _ in artifacts:
-            self.services.check_output_path(target)
-        for target, value in artifacts:
-            target.write_text(json.dumps(value, indent=2) + '\n')
-        if not state.get('failed') and state.get('save_requested') and self.result['review'].get('authorized'):
-            self.services.store_knowledge(self.result['review'])
-        return self.result
+
+        trace_inst = getattr(self.services, 'conversation_trace', None)
+        final_op = None
+        if trace_inst:
+            final_op = trace_inst.start_operation(
+                'finalization',
+                {'status': self.result.get('status'), 'rundir': str(self.rundir)},
+            )
+        try:
+            artifacts = (
+                (self.rundir / 'result.json', self.result),
+            )
+            for target, _ in artifacts:
+                self.services.check_output_path(target)
+            for target, value in artifacts:
+                art_op = None
+                if trace_inst:
+                    art_op = trace_inst.start_operation('artifact_write', {'target': str(target)})
+                try:
+                    target.write_text(json.dumps(value, indent=2) + '\n')
+                    if trace_inst and art_op:
+                        trace_inst.finish_operation(art_op, 'artifact_write', status='completed')
+                except Exception as exc:
+                    if trace_inst and art_op:
+                        trace_inst.finish_operation(art_op, 'artifact_write', status='failed', error=exc)
+                    raise
+            if not state.get('failed') and state.get('save_requested') and self.result['review'].get('authorized'):
+                self.services.store_knowledge(self.result['review'])
+            if trace_inst and final_op:
+                trace_inst.finish_operation(
+                    final_op,
+                    'finalization',
+                    status='completed',
+                    outputs={'status': self.result.get('status'), 'result_path': str(self.rundir / 'result.json')},
+                )
+            return self.result
+        except Exception as exc:
+            if trace_inst and final_op:
+                trace_inst.finish_operation(final_op, 'finalization', status='failed', error=exc)
+            raise
 
     # --------------------------------------------------------------------------
     # Interactive Review and User Prompt Utilities

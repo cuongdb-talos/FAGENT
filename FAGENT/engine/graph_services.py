@@ -130,26 +130,53 @@ class GraphServices:
         raise ValueError(f'Unknown chat_backend: {backend!r}')
 
     def prepare(self, resume=False):
-        if not self.workflow.layout_services:
+        op_id = None
+        if hasattr(self, 'conversation_trace') and self.conversation_trace:
+            op_id = self.conversation_trace.start_operation(
+                'service_setup',
+                {'resume': resume, 'layout_services': self.workflow.layout_services, 'task': self.workflow.task},
+            )
+        try:
+            if not self.workflow.layout_services:
+                self.client = self.build_chat_client()
+                self.embedding_client = None
+                self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
+                if op_id and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                    self.conversation_trace.finish_operation(op_id, 'service_setup', status='completed')
+                return self.messages
+            self.layout = LayoutService(self.rundir, self.verbose, self.config.get('drc_files')).run()
+            self.input_sources = {
+                'gds': str(self.layout.gds_path),
+                'drc': self.layout.drc_data.get('source'),
+                'layer_maps': self.layout.gds_data.get('layer_maps', []),
+                'decks': self.layout.drc_files,
+            }
             self.client = self.build_chat_client()
-            self.embedding_client = None
+            if resume:
+                self.rag = None
+                self.embedding_client = None
+                self.messages = []
+                if op_id and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                    self.conversation_trace.finish_operation(
+                        op_id,
+                        'service_setup',
+                        status='completed',
+                        outputs={'input_sources': self.input_sources},
+                    )
+                return self.messages
             self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
+            if op_id and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                self.conversation_trace.finish_operation(
+                    op_id,
+                    'service_setup',
+                    status='completed',
+                    outputs={'input_sources': self.input_sources},
+                )
             return self.messages
-        self.layout = LayoutService(self.rundir, self.verbose, self.config.get('drc_files')).run()
-        self.input_sources = {
-            'gds': str(self.layout.gds_path),
-            'drc': self.layout.drc_data.get('source'),
-            'layer_maps': self.layout.gds_data.get('layer_maps', []),
-            'decks': self.layout.drc_files,
-        }
-        self.client = self.build_chat_client()
-        if resume:
-            self.rag = None
-            self.embedding_client = None
-            self.messages = []
-            return self.messages
-        self.messages = [{'role': 'system', 'content': self.system_prompt([])}]
-        return self.messages
+        except Exception as exc:
+            if op_id and hasattr(self, 'conversation_trace') and self.conversation_trace:
+                self.conversation_trace.finish_operation(op_id, 'service_setup', status='failed', error=exc)
+            raise
 
     def build_drc_context(self):
         """Read DRC and layout data, then retrieve related knowledge for the graph."""

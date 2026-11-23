@@ -245,6 +245,7 @@ class ConversationTrace:
         if self.check_output_path:
             self.check_output_path(target)
         temp_dir = target.parent
+        temp_dir.mkdir(parents=True, exist_ok=True)
         temp_file = None
         try:
             with tempfile.NamedTemporaryFile('w', dir=temp_dir, delete=False, encoding='utf-8') as handle:

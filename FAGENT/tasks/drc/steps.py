@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from FAGENT.capabilities.layout.input_loader import InputLoader
+from FAGENT.engine.conversation_trace import ConversationTrace
 from FAGENT.engine.graph_services import GraphServices
 
 
@@ -81,8 +82,23 @@ class Steps:
             resolved_maps = [(base / path).resolve() for path in maps]
             task_name = task_cfg.get('task_name') or task_cfg.get('task') or 'drc'
             run_id, rundir = self.allocate_rundir(output, cell, task_name=task_name)
-            InputLoader(gds_path=gds, drc_path=drc, output_dir=rundir,
-                        layer_map_files=resolved_maps, verbose=verbose).run()
+            trace = ConversationTrace(rundir)
+            op_id = trace.start_operation(
+                'preparation',
+                {'cell': cell, 'gds': str(gds), 'drc': str(drc), 'layer_map': [str(path) for path in resolved_maps]},
+            )
+            try:
+                InputLoader(gds_path=gds, drc_path=drc, output_dir=rundir,
+                            layer_map_files=resolved_maps, verbose=verbose).run()
+                trace.finish_operation(
+                    op_id,
+                    'preparation',
+                    status='completed',
+                    outputs={'gds_json': str(rundir / 'gds.json'), 'drc_json': str(rundir / 'drc.json')},
+                )
+            except Exception as exc:
+                trace.finish_operation(op_id, 'preparation', status='failed', error=exc)
+                raise
             yield rundir, config, {**task_cfg, 'cell': cell, 'run_id': run_id, 'rundir': str(rundir),
                                    'gds': str(gds), 'drc': str(drc),
                                    'layer_map': [str(path) for path in resolved_maps]}
