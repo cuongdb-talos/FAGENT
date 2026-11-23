@@ -180,7 +180,121 @@ class DrcTools:
             layout=context.services.layout,
             candidate_digest=context.state.get("candidate_digest"),
         )
-        return ToolResult({"task_id": task_id, "proposals": proposals_result["proposals"]}, {})
+        proposals_list = proposals_result["proposals"]
+        proposals_map = {p["repair_id"]: p for p in proposals_list}
+        existing = dict(context.state.get("proposals") or {})
+        existing.update(proposals_map)
+        updates = {"proposals": existing}
+        return ToolResult({"task_id": task_id, "proposals": proposals_list}, updates)
+
+    def apply_polygon_fix(context, repair_id):
+        """Apply a staged repair proposal to the candidate layout transactionally."""
+        proposals = context.state.get("proposals") or {}
+        proposal = proposals.get(repair_id)
+        if not proposal:
+            raise ValueError(f"Unknown repair_id: {repair_id}")
+
+        expected_digest = proposal.get("candidate_digest")
+        current_digest = context.state.get("candidate_digest")
+        if expected_digest != current_digest:
+            raise ValueError(f"Stale repair proposal {repair_id}: candidate layout has changed (expected {expected_digest}, current {current_digest})")
+
+        assumptions = proposal.get("rule_assumptions", "")
+        if not assumptions:
+            raise ValueError("Proposal lacking verified rule assumptions cannot be applied")
+
+        cell_name = proposal["cell"]
+        polygon_id = proposal["target_polygon_id"]
+        points = proposal["after_points_user"]
+
+        layout = context.services.layout
+        result = layout.replace_polygon(cell_name=cell_name, polygon_id=polygon_id, points=points)
+        if result.get("status") != "modified":
+            return ToolResult(result, {})
+
+        try:
+            candidate = context.services.checkpoint_candidate()
+            digest = GraphServices.candidate_digest(Path(candidate))
+            if not digest:
+                raise ValueError("Missing candidate digest after checkpoint")
+        except Exception:
+            if "old_polygon" in result and "new_polygon" in result and hasattr(layout, "rollback_replace"):
+                layout.rollback_replace(cell_name, polygon_id, result["old_polygon"], result["new_polygon"])
+            raise
+
+        updates = {
+            "candidate_path": str(candidate),
+            "candidate_digest": digest,
+            "validation": None,
+            "proposals": {},
+        }
+        if context.state.get("checklist"):
+            checklist = Checklist.from_dict(context.state["checklist"])
+            checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
+            checklist_path = Path(context.services.rundir) / "checklist.json"
+            if hasattr(context.services, "check_output_path"):
+                context.services.check_output_path(checklist_path)
+            checklist.save(checklist_path)
+            updates["checklist"] = checklist_snapshot
+            updates["checklist_digest"] = checklist_snapshot["digest"]
+            updates["checklist_path"] = str(checklist_path)
+
+        payload = {
+            "status": "applied",
+            "repair_id": repair_id,
+            "cell": cell_name,
+            "polygon_id": polygon_id,
+            "candidate_digest": digest,
+        }
+        return ToolResult(payload, updates)
+
+    def recheck_violation(context, task_id):
+        """Evaluate supported local geometry on the saved candidate layout."""
+        meas_res = DrcTools.measure_violation(context, task_id)
+        meas = meas_res.payload
+        status = meas.get("status")
+        candidate_digest = context.state.get("candidate_digest")
+
+        updates = {}
+        if status == "pass":
+            local_verified = True
+            raw = context.state.get("checklist")
+            if raw:
+                checklist = Checklist.from_dict(raw)
+                evidence_rec = {
+                    "type": "local_geometry_recheck",
+                    "status": "pass",
+                    "candidate_digest": candidate_digest,
+                    "measurement": meas,
+                }
+                snapshot = checklist.update(
+                    task_id=task_id,
+                    status="pass",
+                    reason="Locally verified geometry pass on candidate layout (local geometry only, not full DRC deck clean)",
+                    evidence=[evidence_rec],
+                )
+                checklist_path = Path(context.services.rundir) / "checklist.json"
+                if hasattr(context.services, "check_output_path"):
+                    context.services.check_output_path(checklist_path)
+                checklist.save(checklist_path)
+                updates = {
+                    "checklist": snapshot,
+                    "checklist_digest": snapshot["digest"],
+                    "checklist_path": str(checklist_path),
+                }
+        else:
+            local_verified = False
+
+        payload = {
+            "status": status,
+            "task_id": task_id,
+            "local_verified": local_verified,
+            "deck_clean": False,
+            "notice": "Local geometry recheck only; not a deck-level DRC pass.",
+            "measurement": meas,
+            "candidate_digest": candidate_digest,
+        }
+        return ToolResult(payload, updates)
 
     def read_checklist(context):
         """Return the current run-scoped violation checklist."""
@@ -346,7 +460,121 @@ class DrcTools:
             layout=context.services.layout,
             candidate_digest=context.state.get("candidate_digest"),
         )
-        return ToolResult({"task_id": task_id, "proposals": proposals_result["proposals"]}, {})
+        proposals_list = proposals_result["proposals"]
+        proposals_map = {p["repair_id"]: p for p in proposals_list}
+        existing = dict(context.state.get("proposals") or {})
+        existing.update(proposals_map)
+        updates = {"proposals": existing}
+        return ToolResult({"task_id": task_id, "proposals": proposals_list}, updates)
+
+    def apply_polygon_fix(context, repair_id):
+        """Apply a staged repair proposal to the candidate layout transactionally."""
+        proposals = context.state.get("proposals") or {}
+        proposal = proposals.get(repair_id)
+        if not proposal:
+            raise ValueError(f"Unknown repair_id: {repair_id}")
+
+        expected_digest = proposal.get("candidate_digest")
+        current_digest = context.state.get("candidate_digest")
+        if expected_digest != current_digest:
+            raise ValueError(f"Stale repair proposal {repair_id}: candidate layout has changed (expected {expected_digest}, current {current_digest})")
+
+        assumptions = proposal.get("rule_assumptions", "")
+        if not assumptions:
+            raise ValueError("Proposal lacking verified rule assumptions cannot be applied")
+
+        cell_name = proposal["cell"]
+        polygon_id = proposal["target_polygon_id"]
+        points = proposal["after_points_user"]
+
+        layout = context.services.layout
+        result = layout.replace_polygon(cell_name=cell_name, polygon_id=polygon_id, points=points)
+        if result.get("status") != "modified":
+            return ToolResult(result, {})
+
+        try:
+            candidate = context.services.checkpoint_candidate()
+            digest = GraphServices.candidate_digest(Path(candidate))
+            if not digest:
+                raise ValueError("Missing candidate digest after checkpoint")
+        except Exception:
+            if "old_polygon" in result and "new_polygon" in result and hasattr(layout, "rollback_replace"):
+                layout.rollback_replace(cell_name, polygon_id, result["old_polygon"], result["new_polygon"])
+            raise
+
+        updates = {
+            "candidate_path": str(candidate),
+            "candidate_digest": digest,
+            "validation": None,
+            "proposals": {},
+        }
+        if context.state.get("checklist"):
+            checklist = Checklist.from_dict(context.state["checklist"])
+            checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
+            checklist_path = Path(context.services.rundir) / "checklist.json"
+            if hasattr(context.services, "check_output_path"):
+                context.services.check_output_path(checklist_path)
+            checklist.save(checklist_path)
+            updates["checklist"] = checklist_snapshot
+            updates["checklist_digest"] = checklist_snapshot["digest"]
+            updates["checklist_path"] = str(checklist_path)
+
+        payload = {
+            "status": "applied",
+            "repair_id": repair_id,
+            "cell": cell_name,
+            "polygon_id": polygon_id,
+            "candidate_digest": digest,
+        }
+        return ToolResult(payload, updates)
+
+    def recheck_violation(context, task_id):
+        """Evaluate supported local geometry on the saved candidate layout."""
+        meas_res = DrcTools.measure_violation(context, task_id)
+        meas = meas_res.payload
+        status = meas.get("status")
+        candidate_digest = context.state.get("candidate_digest")
+
+        updates = {}
+        if status == "pass":
+            local_verified = True
+            raw = context.state.get("checklist")
+            if raw:
+                checklist = Checklist.from_dict(raw)
+                evidence_rec = {
+                    "type": "local_geometry_recheck",
+                    "status": "pass",
+                    "candidate_digest": candidate_digest,
+                    "measurement": meas,
+                }
+                snapshot = checklist.update(
+                    task_id=task_id,
+                    status="pass",
+                    reason="Locally verified geometry pass on candidate layout (local geometry only, not full DRC deck clean)",
+                    evidence=[evidence_rec],
+                )
+                checklist_path = Path(context.services.rundir) / "checklist.json"
+                if hasattr(context.services, "check_output_path"):
+                    context.services.check_output_path(checklist_path)
+                checklist.save(checklist_path)
+                updates = {
+                    "checklist": snapshot,
+                    "checklist_digest": snapshot["digest"],
+                    "checklist_path": str(checklist_path),
+                }
+        else:
+            local_verified = False
+
+        payload = {
+            "status": status,
+            "task_id": task_id,
+            "local_verified": local_verified,
+            "deck_clean": False,
+            "notice": "Local geometry recheck only; not a deck-level DRC pass.",
+            "measurement": meas,
+            "candidate_digest": candidate_digest,
+        }
+        return ToolResult(payload, updates)
 
     def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
         """Update one existing checklist task and persist the updated checklist atomically."""
@@ -383,6 +611,8 @@ class DrcTools:
     find_related_polygons = staticmethod(find_related_polygons)
     measure_violation = staticmethod(measure_violation)
     propose_polygon_fix = staticmethod(propose_polygon_fix)
+    apply_polygon_fix = staticmethod(apply_polygon_fix)
+    recheck_violation = staticmethod(recheck_violation)
     update_checklist = staticmethod(update_checklist)
 
 
@@ -516,6 +746,34 @@ propose_polygon_fix.task_tool = ToolSpec(
         "properties": {
             "task_id": {"type": "string"},
             "polygon_ids": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+apply_polygon_fix = DrcTools.apply_polygon_fix
+apply_polygon_fix.task_tool = ToolSpec(
+    function=apply_polygon_fix,
+    description="Apply a staged repair proposal to the candidate layout transactionally.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "repair_id": {"type": "string"},
+        },
+        "required": ["repair_id"],
+        "additionalProperties": False,
+    },
+)
+
+recheck_violation = DrcTools.recheck_violation
+recheck_violation.task_tool = ToolSpec(
+    function=recheck_violation,
+    description="Evaluate supported local geometry on the saved candidate layout and bind evidence to candidate digest.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
         },
         "required": ["task_id"],
         "additionalProperties": False,

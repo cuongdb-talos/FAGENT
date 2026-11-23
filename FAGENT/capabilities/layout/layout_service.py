@@ -126,7 +126,16 @@ class LayoutService:
             'polygon_id': polygon_id,
             'layer': old.layer,
             'datatype': old.datatype,
+            'old_polygon': old,
+            'new_polygon': new,
         }
+
+    def rollback_replace(self, cell_name, polygon_id, old_polygon, new_polygon):
+        """Rollback in-memory polygon replacement and restore original polygon ID binding."""
+        cell = self.get_cell(cell_name)
+        cell.remove(new_polygon)
+        cell.add(old_polygon)
+        self.polygon_ids.rebind(cell_name, polygon_id, new_polygon, old_polygon)
 
     def _get_polygon(self, cell_name, polygon_id):
         old = self.polygon_ids.resolve(cell_name, polygon_id)
