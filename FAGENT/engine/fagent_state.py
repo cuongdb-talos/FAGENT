@@ -55,3 +55,4 @@ class FagentState(TypedDict, total=False):
     plan: dict[str, Any] | None
     replan_context: dict[str, Any] | None
     replan_count: int
+    proposals: dict[str, Any]

@@ -29,6 +29,13 @@ nodes:
   - tools:check_cover
   - tools:read_checklist
   - tools:update_checklist
+  - tools:get_violation
+  - tools:find_rule
+  - tools:find_related_polygons
+  - tools:measure_violation
+  - tools:propose_polygon_fix
+  - tools:apply_polygon_fix
+  - tools:recheck_violation
 # - id: validate
 #   action: steps:validate_drc
 #   next: human_review

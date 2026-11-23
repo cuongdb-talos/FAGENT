@@ -43,6 +43,8 @@ class ViolationGeometry:
             }
             return self.result
 
+        if hasattr(self.layout, 'load_library'):
+            self.layout.load_library()
         scale = self.layout.polygon_ids.library_scale(self.layout.library)
         cell_name = (
             getattr(self.layout, 'top_cell', None)
