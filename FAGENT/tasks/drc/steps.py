@@ -41,8 +41,6 @@ class Steps:
         else:
             updated_messages = [{'role': 'system', 'content': sys_content}, *current_messages]
 
-        updated_messages.append({'role': 'user', 'content': json.dumps({'drc_context': drc_context})})
-
         # Initialize deterministic checklist from report
         report = context.services.drc_report
         evidence = None

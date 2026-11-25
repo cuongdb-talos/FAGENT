@@ -25,7 +25,9 @@ from langgraph.types import interrupt
 # ==============================================================================
 from .fagent_state import FagentState
 from .task_contracts import TaskContext, ToolResult
+from ..capabilities.layout.violation_geometry import ViolationGeometry
 from ..tasks.drc.checklist import Checklist
+from ..tasks.drc.rule_evidence import RuleEvidence
 
 
 # ==============================================================================
@@ -667,45 +669,183 @@ class GraphNodes:
         return list(specs.values())
 
     def build_active_task_context(self, state, task_id: str) -> dict:
-        """Build per-marker context with DBU-converted coordinates and current candidate GDS."""
+        """Build per-marker context with DBU-converted coordinates, rule evidence, and bounded region geometry."""
         checklist = state.get('checklist') or {}
         task = next((t for t in checklist.get('tasks', []) if t.get('task_id') == task_id), {})
         report = state.get('report') or {}
-        marker = None
-        if task:
-            rule_name = task.get('rule')
-            vid = task.get('violation_id')
-            occ = task.get('occurrence', 0)
-            for rule in report.get('rules') or []:
-                if rule.get('name') != rule_name:
-                    continue
-                seen = 0
-                for geom in rule.get('geometry') or []:
-                    if geom.get('id') == vid:
-                        if seen == occ:
-                            marker = geom
-                            break
-                        seen += 1
-                if marker is not None:
-                    break
+        rule_name = task.get('rule')
+        vid = task.get('violation_id')
+        occ = task.get('occurrence', 0)
+
+        marker = self._resolve_exact_marker(report, rule_name, vid, occ)
         scale = report.get('dbu_per_user_unit')
+        valid_scale = isinstance(scale, (int, float)) and not isinstance(scale, bool) and scale > 0
         points_dbu = marker.get('points_dbu') if isinstance(marker, dict) else None
         points_user = None
-        if isinstance(points_dbu, list) and isinstance(scale, (int, float)) and scale > 0:
+        if isinstance(points_dbu, list) and points_dbu and valid_scale:
             points_user = [[pt[0] / scale, pt[1] / scale] for pt in points_dbu]
-        drc_context = state.get('drc_context') or {}
+
+        margin_dbu = self._configured_margin_dbu()
+        margin_user = (margin_dbu / scale) if valid_scale else None
+        bounds_user = self._marker_bounds_user(points_user, margin_user) if (points_user and margin_user is not None) else None
+
+        rule_evidence = self._build_rule_evidence(task)
+        drc_available = bool(marker is not None and valid_scale and rule_evidence.get('found'))
+        drc_reasons = []
+        if marker is None:
+            drc_reasons.append('Missing violation marker geometry')
+        if not valid_scale:
+            drc_reasons.append('Missing or invalid dbu_per_user_unit')
+        if not rule_evidence.get('found'):
+            drc_reasons.append(rule_evidence.get('reason') or 'Unavailable rule evidence')
+
+        layout_section = self._build_layout_region_context(state, bounds_user, margin_user, margin_dbu)
+
         return {
-            'task_id': task_id,
-            'rule': task.get('rule'),
-            'violation_id': task.get('violation_id'),
-            'occurrence': task.get('occurrence', 0),
-            'status': task.get('status'),
-            'dbu_per_user_unit': scale,
-            'marker': marker,
-            'points_user': points_user,
-            'gds': drc_context.get('gds'),
-            'candidate_path': state.get('candidate_path'),
-            'candidate_digest': state.get('candidate_digest'),
+            'task': {
+                'task_id': task_id,
+                'rule': rule_name,
+                'violation_id': vid,
+                'occurrence': occ,
+                'status': task.get('status'),
+            },
+            'drc': {
+                'rule': rule_name,
+                'dbu_per_user_unit': scale,
+                'marker_dbu': points_dbu,
+                'marker_user': points_user,
+                'rule_evidence': rule_evidence,
+                'status': 'available' if drc_available else 'unavailable',
+                'reason': '; '.join(drc_reasons),
+            },
+            'layout': layout_section,
+        }
+
+    def _resolve_exact_marker(self, report: dict, rule_name, vid, occ: int):
+        """Resolve exact marker occurrence matching rule + violation_id + occurrence."""
+        if not rule_name or vid is None:
+            return None
+        for rule in report.get('rules') or []:
+            if rule.get('name') != rule_name:
+                continue
+            seen = 0
+            for geom in rule.get('geometry') or []:
+                if geom.get('id') == vid:
+                    if seen == occ:
+                        return geom
+                    seen += 1
+        return None
+
+    def _configured_margin_dbu(self) -> float:
+        """Read nonnegative drc_context_margin_dbu from service configuration, defaulting to 0.0."""
+        config = getattr(self.services, 'config', None) or {}
+        raw = config.get('drc_context_margin_dbu', 0.0)
+        if raw is None:
+            return 0.0
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+            raise ValueError(f'Invalid drc_context_margin_dbu: {raw!r}')
+        return float(raw)
+
+    def _marker_bounds_user(self, points_user: list, margin_user: float) -> list[float]:
+        """Compute [min_x, min_y, max_x, max_y] user bounds from marker points and margin."""
+        xs = [float(pt[0]) for pt in points_user]
+        ys = [float(pt[1]) for pt in points_user]
+        return [
+            round(min(xs) - margin_user, 12),
+            round(min(ys) - margin_user, 12),
+            round(max(xs) + margin_user, 12),
+            round(max(ys) + margin_user, 12),
+        ]
+
+    def _build_rule_evidence(self, task: dict) -> dict:
+        """Resolve rule text and layer mapping from configured decks and layer maps."""
+        rule_name = str(task.get('rule') or '').strip()
+        if not rule_name:
+            return {
+                'rule': None,
+                'found': False,
+                'deck_file': None,
+                'line_start': None,
+                'line_end': None,
+                'rule_text': '',
+                'layer_mapping': {},
+                'layer_mapping_provenance': {},
+                'mapping_diagnostics': {'missing_sources': [], 'ambiguous_layers': {}, 'non_drawing_entries': {}},
+                'supported': False,
+                'reason': 'Missing rule name for active task',
+            }
+        sources = getattr(self.services, 'input_sources', None) or {}
+        config = getattr(self.services, 'config', None) or {}
+        decks = sources.get('decks') or config.get('drc_files') or []
+        if isinstance(decks, (str, Path)):
+            decks = [decks]
+        layer_maps = sources.get('layer_maps') or config.get('layer_map_files') or []
+        if isinstance(layer_maps, (str, Path)):
+            layer_maps = [layer_maps]
+        if not decks:
+            return {
+                'rule': rule_name,
+                'found': False,
+                'deck_file': None,
+                'line_start': None,
+                'line_end': None,
+                'rule_text': '',
+                'layer_mapping': {},
+                'layer_mapping_provenance': {},
+                'mapping_diagnostics': {'missing_sources': [], 'ambiguous_layers': {}, 'non_drawing_entries': {}},
+                'supported': False,
+                'reason': 'No DRC rule deck configured',
+            }
+        return RuleEvidence().run({'rule': rule_name}, deck_paths=list(decks), layer_maps=list(layer_maps))
+
+    def _build_layout_region_context(self, state: dict, bounds_user, margin_user, margin_dbu: float) -> dict:
+        """Query live candidate layout geometry for bounds_user or return explicit unavailable status."""
+        drc_context = state.get('drc_context') or {}
+        report = state.get('report') or {}
+        target_cell = drc_context.get('target_cell') or report.get('top_cell')
+        candidate_path = state.get('candidate_path')
+        candidate_digest = state.get('candidate_digest')
+        search_region = {
+            'bounds_user': bounds_user,
+            'margin_user': margin_user,
+            'margin_dbu': margin_dbu,
+        }
+        layout = getattr(self.services, 'layout', None)
+        if bounds_user is None or not target_cell or layout is None or not hasattr(layout, 'get_cell'):
+            reason = (
+                'Missing or invalid marker bounds/scale'
+                if bounds_user is None
+                else 'Missing target cell or layout service'
+            )
+            return {
+                'cell': target_cell,
+                'candidate_path': candidate_path,
+                'candidate_digest': candidate_digest,
+                'search_region': search_region,
+                'polygons': [],
+                'references_in_region': [],
+                'paths_in_region': [],
+                'complete': False,
+                'status': 'unavailable',
+                'reason': reason,
+            }
+        region = ViolationGeometry().query_region(
+            layout,
+            target_cell,
+            bounds_user,
+            candidate_digest=candidate_digest,
+        )
+        return {
+            'cell': region['cell'],
+            'candidate_path': candidate_path,
+            'candidate_digest': region['candidate_digest'],
+            'search_region': search_region,
+            'polygons': region['polygons'],
+            'references_in_region': region['references_in_region'],
+            'paths_in_region': region['paths_in_region'],
+            'complete': region['complete'],
+            'status': 'available',
+            'reason': region['reason'],
         }
 
     def refresh_candidate_context(self, context, updates: dict) -> None:
