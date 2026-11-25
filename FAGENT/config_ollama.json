@@ -1,0 +1,16 @@
+{
+  "chat_backend": "openai",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "api_key_env": "OLLAMA_API_KEY",
+  "agent_model_path": "gemma4-e2b-local:latest",
+  "response_format_style": "json_schema",
+  "embedding_model_path": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI_BUNDLE/models/embeddings/bge-m3-q8_0.gguf",
+  "embedding_n_ctx": 8192,
+  "embedding_n_threads": null,
+  "embedding_n_gpu_layers": 0,
+  "embedding_batch_size": 16,
+  "max_iterations": 20,
+  "rag_limit": 5,
+  "rag_context_chars": 8000,
+  "system_prompt_file": "knowledge/templates/prompts/drc_site.md"
+}

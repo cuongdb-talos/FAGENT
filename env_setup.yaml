@@ -1,9 +1,9 @@
 list_cells : "list"
-layer_map_files : ["config/layer_mapping"]
+layer_map_files : ["config/smec55.layermap"]
 output_folder : "output"
 tasks :
   - drc :
       drc_folder : "DRC"
       gds_folder : "DRC"
       drc_files : "DRC/1P7M_6Ic_1TKMc_ALPA2.drc"
-      prompt : "Fix all DRC errors but ignore error about density."
+      prompt : "Fix all DRC errors about M1 and CT layer but ignore error about density."
