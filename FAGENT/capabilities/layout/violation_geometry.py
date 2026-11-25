@@ -1,5 +1,6 @@
 # === SECTION 1: Imports ===
 import copy
+import math
 from pathlib import Path
 import sys
 
@@ -77,6 +78,16 @@ class ViolationGeometry:
         margin_user = self.search_margin_dbu / scale
         marker_geom = self._create_marker_geometry(pts_user, margin_user)
 
+        if self._references_affect_region(cell, marker_geom):
+            self.result = {
+                'status': 'unsupported',
+                'reason': 'Hierarchical references or paths in search region are unsupported',
+                'cell': cell_name,
+                'candidate_digest': self.candidate_digest,
+                'matched_polygons': [],
+            }
+            return self.result
+
         layer_mapping = self.rule_evidence.get('layer_mapping', {})
         matched_list = []
 
@@ -127,6 +138,7 @@ class ViolationGeometry:
                 'spatial_relation': relation,
             })
 
+        shared_ok, shared_reason = self._verify_shared_cell_impact(cell_name, cell, marker_geom)
         self.result = {
             'status': 'matched',
             'reason': '',
@@ -134,6 +146,14 @@ class ViolationGeometry:
             'candidate_digest': self.candidate_digest,
             'matched_polygons': matched_list,
             'dbu_per_user_unit': scale,
+            'shared_cell_impact_verified': shared_ok,
+            'verification_evidence': {
+                'candidate_digest': self.candidate_digest,
+                'cell': cell_name,
+                'polygon_ids': [m['polygon_id'] for m in matched_list],
+                'shared_cell_impact_verified': shared_ok,
+                'shared_cell_reason': shared_reason,
+            },
         }
         return self.result
 
@@ -148,10 +168,202 @@ class ViolationGeometry:
         self.candidate_digest = None
         self.search_margin_dbu = 0.0
         self.result = None
+        self.region_result = None
+
+    # --------------------------------------------------------------------------
+    # Bounded Region Query
+    # --------------------------------------------------------------------------
+    def query_region(
+        self,
+        layout,
+        cell_name: str,
+        bounds_user: list[float],
+        candidate_digest: str | None,
+        layer_specs: list[dict] | None = None,
+    ) -> dict:
+        """Query all direct polygons and conservative hierarchy overlaps within bounds_user."""
+        min_x, min_y, max_x, max_y = self._validate_bounds_user(bounds_user)
+        allowed_layers = self._parse_layer_specs(layer_specs)
+
+        if hasattr(layout, 'load_library'):
+            layout.load_library()
+        cell = layout.get_cell(cell_name)
+        region_geom = shapely_box(min_x, min_y, max_x, max_y)
+
+        polygons = []
+        for p in getattr(cell, 'polygons', None) or []:
+            layer_num = int(p.layer)
+            datatype_num = int(p.datatype)
+            if allowed_layers is not None and (layer_num, datatype_num) not in allowed_layers:
+                continue
+            if len(p.points) < 3:
+                continue
+            poly_geom = ShapelyPolygon(p.points)
+            if poly_geom.intersects(region_geom) or poly_geom.distance(region_geom) <= 1e-6:
+                pid = layout.polygon_ids.id_for(cell_name, p)
+                points = p.points.tolist() if hasattr(p.points, 'tolist') else [list(pt) for pt in p.points]
+                polygons.append({
+                    'id': pid,
+                    'layer': layer_num,
+                    'datatype': datatype_num,
+                    'points': points,
+                    'editable': True,
+                })
+
+        references_in_region = self._collect_references_in_region(cell, region_geom)
+        paths_in_region = self._collect_paths_in_region(cell, region_geom)
+        complete = len(references_in_region) == 0 and len(paths_in_region) == 0
+        reason = '' if complete else 'Region contains unsupported hierarchical references or paths'
+
+        self.region_result = {
+            'cell': cell_name,
+            'bounds_user': [min_x, min_y, max_x, max_y],
+            'candidate_digest': candidate_digest,
+            'coordinate_units': 'user',
+            'polygons': polygons,
+            'references_in_region': references_in_region,
+            'paths_in_region': paths_in_region,
+            'complete': complete,
+            'reason': reason,
+        }
+        return self.region_result
 
     # --------------------------------------------------------------------------
     # Helper Methods
     # --------------------------------------------------------------------------
+    def _validate_bounds_user(self, bounds_user) -> tuple[float, float, float, float]:
+        """Validate bounds_user as four finite numbers [min_x, min_y, max_x, max_y]."""
+        if not isinstance(bounds_user, (list, tuple)) or len(bounds_user) != 4:
+            raise ValueError('bounds_user must be a 4-element list [min_x, min_y, max_x, max_y]')
+        parsed = []
+        for value in bounds_user:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError('bounds_user entries must be numeric')
+            num = float(value)
+            if not math.isfinite(num):
+                raise ValueError('bounds_user entries must be finite')
+            parsed.append(num)
+        min_x, min_y, max_x, max_y = parsed
+        if min_x > max_x or min_y > max_y:
+            raise ValueError('bounds_user must satisfy min_x <= max_x and min_y <= max_y')
+        return min_x, min_y, max_x, max_y
+
+    def _parse_layer_specs(self, layer_specs) -> set[tuple[int, int]] | None:
+        """Parse optional physical layer filter dicts into a set of (layer, datatype) tuples."""
+        if layer_specs is None:
+            return None
+        if not isinstance(layer_specs, (list, tuple)):
+            raise ValueError('layer_specs must be a list of {layer, datatype} dicts')
+        allowed = set()
+        for spec in layer_specs:
+            if not isinstance(spec, dict) or 'layer' not in spec or 'datatype' not in spec:
+                raise ValueError('Each layer spec must contain integer layer and datatype')
+            layer = spec['layer']
+            datatype = spec['datatype']
+            if isinstance(layer, bool) or not isinstance(layer, int) or isinstance(datatype, bool) or not isinstance(datatype, int):
+                raise ValueError('layer and datatype must be integers')
+            allowed.add((layer, datatype))
+        return allowed
+
+    def _collect_references_in_region(self, cell, region_geom) -> list[dict]:
+        """Collect cell references overlapping region_geom or having unknown bounds."""
+        found = []
+        for ref in getattr(cell, 'references', None) or []:
+            ref_cell = getattr(ref, 'cell', None)
+            ref_name = getattr(ref_cell, 'name', None) or getattr(ref, 'cell_name', None) or 'unknown'
+            try:
+                bbox = ref.bounding_box()
+            except Exception:
+                bbox = None
+            if bbox is None:
+                found.append({'cell': ref_name, 'bounds_known': False, 'editable': False})
+                continue
+            ref_box = shapely_box(bbox[0][0], bbox[0][1], bbox[1][0], bbox[1][1])
+            if ref_box.intersects(region_geom) or ref_box.distance(region_geom) <= 1e-6:
+                found.append({
+                    'cell': ref_name,
+                    'bounds_known': True,
+                    'bounds_user': [float(bbox[0][0]), float(bbox[0][1]), float(bbox[1][0]), float(bbox[1][1])],
+                    'editable': False,
+                })
+        return found
+
+    def _collect_paths_in_region(self, cell, region_geom) -> list[dict]:
+        """Collect path elements overlapping region_geom or having unknown bounds."""
+        found = []
+        for path in getattr(cell, 'paths', None) or []:
+            layers = [int(v) for v in (getattr(path, 'layers', None) or [])]
+            datatypes = [int(v) for v in (getattr(path, 'datatypes', None) or [])]
+            bbox = self._path_bounding_box(path)
+            if bbox is None:
+                found.append({'layers': layers, 'datatypes': datatypes, 'bounds_known': False, 'editable': False})
+                continue
+            path_box = shapely_box(bbox[0][0], bbox[0][1], bbox[1][0], bbox[1][1])
+            if path_box.intersects(region_geom) or path_box.distance(region_geom) <= 1e-6:
+                found.append({
+                    'layers': layers,
+                    'datatypes': datatypes,
+                    'bounds_known': True,
+                    'bounds_user': [float(bbox[0][0]), float(bbox[0][1]), float(bbox[1][0]), float(bbox[1][1])],
+                    'editable': False,
+                })
+        return found
+
+    def _path_bounding_box(self, path):
+        """Return ((min_x, min_y), (max_x, max_y)) for a path, or None if unavailable."""
+        if hasattr(path, 'bounding_box'):
+            try:
+                bbox = path.bounding_box()
+                if bbox is not None:
+                    return bbox
+            except Exception:
+                return None
+        if hasattr(path, 'to_polygons'):
+            try:
+                polys = path.to_polygons()
+                if polys:
+                    xs = [float(pt[0]) for poly in polys for pt in poly.points]
+                    ys = [float(pt[1]) for poly in polys for pt in poly.points]
+                    if xs and ys:
+                        return ((min(xs), min(ys)), (max(xs), max(ys)))
+            except Exception:
+                return None
+        return None
+    def _verify_shared_cell_impact(self, cell_name: str, cell, marker_geom) -> tuple:
+        """Verify cell is not instanced by parent cells and has no overlapping references or paths."""
+        if getattr(cell, 'paths', None) and len(cell.paths) > 0:
+            return False, 'Cell contains unsupported path elements'
+        if self._references_affect_region(cell, marker_geom):
+            return False, 'Hierarchical references overlap marker region'
+        lib = getattr(self.layout, 'library', None)
+        cells = getattr(lib, 'cells', None)
+        if cells is None:
+            return False, 'Missing layout library hierarchy information'
+        for other in cells:
+            if getattr(other, 'name', None) == cell_name:
+                continue
+            for ref in getattr(other, 'references', None) or []:
+                ref_cell = getattr(ref, 'cell', None)
+                ref_name = getattr(ref_cell, 'name', None) or getattr(ref, 'cell_name', None)
+                if ref_name == cell_name:
+                    return False, f'Cell {cell_name} is shared and instanced by {getattr(other, "name", "parent")}'
+        return True, ''
+
+    def _references_affect_region(self, cell, marker_geom) -> bool:
+        """Return True if any cell reference can intersect or affect the marker search region."""
+        refs = getattr(cell, 'references', None) or []
+        for ref in refs:
+            try:
+                bbox = ref.bounding_box()
+            except Exception:
+                return True
+            if bbox is None:
+                continue
+            ref_box = shapely_box(bbox[0][0], bbox[0][1], bbox[1][0], bbox[1][1])
+            if ref_box.intersects(marker_geom) or ref_box.distance(marker_geom) <= 1e-6:
+                return True
+        return False
+
     def _create_marker_geometry(self, pts_user: list, margin: float):
         """Construct a Shapely geometry from user coordinates with optional margin."""
         if len(pts_user) == 1:
