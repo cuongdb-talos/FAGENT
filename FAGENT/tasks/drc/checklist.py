@@ -23,7 +23,7 @@ class Checklist:
     # --------------------------------------------------------------------------
     # Main Execution Entry Point
     # --------------------------------------------------------------------------
-    def run(self, report: dict = None, proposed_tasks: list = None, goal: str = '') -> 'Checklist':
+    def run(self, report: dict = None, proposed_tasks: list = None, goal: str = '', rule_evidence: dict | None = None) -> 'Checklist':
         """Reconcile report violations against proposed_tasks or build deterministic report items."""
         if report is None:
             raise ValueError('DRC report must be provided')
@@ -38,13 +38,17 @@ class Checklist:
                     status = 'unresolved'
                     reason = item.get('missing_reason', 'Missing geometry in report')
                     work = f'Investigate missing geometry for {item["rule"]}'
-                elif self._skip_allowed(item['rule'], '', goal):
+                elif self._skip_allowed(item['rule'], '', goal, rule_evidence):
                     status = 'skipped'
-                    reason = f'Excluded by goal: {goal}'
+                    evidence = (rule_evidence or {}).get(item['rule'], {})
+                    if evidence.get('density') and self.excludes_density(goal):
+                        reason = f"Excluded by goal: density in {evidence['deck_file']}, lines {evidence['line_start']}-{evidence['line_end']}"
+                    else:
+                        reason = f'Excluded by goal: {goal}'
                     work = ''
                 else:
                     status = 'pending'
-                    reason = ''
+                    reason = (rule_evidence or {}).get(item['rule'], {}).get('reason', '')
                     work = ''
                 tasks.append({
                     'task_id': f'task-{idx}',
@@ -135,6 +139,14 @@ class Checklist:
             'summary': self.summary(),
             'digest': self.digest(),
         }
+
+    def queue_ids(self) -> list[str]:
+        """Return active task IDs in report order, excluding read-time skipped or unresolved items."""
+        return [
+            task['task_id']
+            for task in self.tasks
+            if task.get('status') in ('pending', 'in_progress')
+        ]
 
     # --------------------------------------------------------------------------
     # Task Updates and Conservative Invalidation
@@ -365,7 +377,18 @@ class Checklist:
                 return idx
         return None
 
-    def _skip_allowed(self, rule: str, reason: str, goal: str) -> bool:
+    @classmethod
+    def excludes_density(cls, goal: str) -> bool:
+        if not isinstance(goal, str):
+            return False
+        verbs = '|'.join(cls.SKIP_KEYWORDS)
+        return bool(re.search(
+            rf'(?:^|[.!?;\n]|\bbut\b|\band\b)\s*(?:please\s+)?(?:{verbs})\s+'
+            r'(?:the\s+)?(?:(?:drc\s+)?errors?\s+about\s+)?density\b',
+            goal, re.IGNORECASE,
+        ))
+
+    def _skip_allowed(self, rule: str, reason: str, goal: str, rule_evidence: dict | None = None) -> bool:
         """Allow skipping only when configured goal authorizes the skipped category."""
         if not isinstance(goal, str) or not goal.strip():
             return False
@@ -375,5 +398,16 @@ class Checklist:
         exclusion_terms = set(re.findall(r'[a-z0-9_]+', goal_lower)) - set(self.SKIP_KEYWORDS) - {
             'all', 'drc', 'errors', 'error', 'about', 'only', 'the', 'but', 'and', 'or', 'fix', 'rules', 'rule', 'of', 'for',
         }
+        if rule_evidence is not None and self.excludes_density(goal):
+            if rule_evidence.get(rule, {}).get('density'):
+                return True
+            verbs = '|'.join(self.SKIP_KEYWORDS)
+            clauses = re.split(r'[.!?;\n]|\b(?:but|then)\b', goal_lower)
+            targets = (
+                re.findall(r'[a-z0-9_]+', match[1])
+                for clause in clauses
+                if (match := re.search(rf'\b(?:{verbs})\s+(.+)', clause))
+            )
+            return rule.lower() != 'density' and any(rule.lower() in words for words in targets)
         target_text = f'{rule} {reason}'.lower().strip()
         return any(term in target_text for term in exclusion_terms if len(term) >= 3)

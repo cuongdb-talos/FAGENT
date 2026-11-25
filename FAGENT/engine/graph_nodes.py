@@ -422,7 +422,7 @@ class GraphNodes:
     def write_checklist_artifact(self, checklist):
         path = Path(self.services.rundir) / 'checklist.json'
         self.services.check_output_path(path)
-        path.write_text(json.dumps(checklist, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        Checklist.from_dict(checklist).save(path)
         return str(path)
 
     @staticmethod

@@ -9,6 +9,7 @@ from FAGENT.capabilities.layout.input_loader import InputLoader
 from FAGENT.engine.conversation_trace import ConversationTrace
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.tasks.drc.checklist import Checklist
+from FAGENT.tasks.drc.rule_evidence import RuleEvidence
 
 
 # === SECTION 2: Steps ===
@@ -44,25 +45,50 @@ class Steps:
 
         # Initialize deterministic checklist from report
         report = context.services.drc_report
-        checklist = Checklist().run(report=report, proposed_tasks=None, goal=goal)
+        evidence = None
+        if isinstance(report, dict) and Checklist.excludes_density(goal):
+            sources = getattr(context.services, 'input_sources', None) or {}
+            decks = sources.get('decks') or context.services.config.get('drc_files', [])
+            if isinstance(decks, (str, Path)):
+                decks = [decks]
+            names = {str(rule.get('name', '')).strip() for rule in (report.get('rules') or [])}
+            names.update(report.get('violations_by_rule') or {})
+            evidence = RuleEvidence().density_evidence(names - {''}, decks)
+        checklist = Checklist().run(report=report, goal=goal, rule_evidence=evidence)
         snapshot = checklist.read()
-        checklist_path = None
-        if hasattr(context.services, 'rundir') and context.services.rundir:
-            checklist_path = Path(context.services.rundir) / 'checklist.json'
-            if hasattr(context.services, 'check_output_path'):
-                context.services.check_output_path(checklist_path)
-            checklist.save(checklist_path)
-
+        task_queue = checklist.queue_ids()
         result = {
             'report': report,
             'drc_context': drc_context,
             'messages': updated_messages,
             'checklist': snapshot,
             'checklist_digest': snapshot['digest'],
+            'checklist_path': str(Path(context.services.rundir) / 'checklist.json'),
+            'task_queue': task_queue,
+            'current_task_id': task_queue[0] if task_queue else None,
         }
-        if checklist_path:
-            result['checklist_path'] = str(checklist_path)
+        context.services.check_output_path(Path(result['checklist_path']))
+        checklist.save(Path(result['checklist_path']))
         return result
+
+    def read_gds(self, context):
+        """Read target cell geometry in GDS user units and attach it to drc_context."""
+        report = context.state.get('report') or {}
+        drc_context = dict(context.state.get('drc_context') or {})
+        target_cell = (
+            report.get('top_cell')
+            or (drc_context.get('drc') or {}).get('top_cell')
+            or context.inputs.get('cell')
+        )
+        if not isinstance(target_cell, str) or not target_cell.strip():
+            raise ValueError('Missing target cell for read_gds')
+        gds_payload = context.services.layout.read_gds(cell_name=target_cell)
+        drc_context['gds'] = gds_payload
+        drc_context['target_cell'] = target_cell
+        drc_context['candidate_path'] = context.state.get('candidate_path')
+        drc_context['candidate_digest'] = context.state.get('candidate_digest')
+        inspected = list(dict.fromkeys([*(context.state.get('inspected') or []), target_cell]))
+        return {'drc_context': drc_context, 'inspected': inspected}
 
     def validate_drc(self, context):
         candidate = context.state.get('candidate_path')
@@ -151,5 +177,6 @@ class Steps:
 
 _steps = Steps()
 read_drc = _steps.read_drc
+read_gds = _steps.read_gds
 validate_drc = _steps.validate_drc
 prepare = _steps.prepare
