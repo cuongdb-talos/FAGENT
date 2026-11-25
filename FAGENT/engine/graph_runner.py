@@ -81,7 +81,7 @@ class GraphRunner:
             self.graph = GraphBuilder(self.services, self.checkpointer).run()
             self.graph_config = {
                 'configurable': {'thread_id': self.thread_id},
-                'recursion_limit': max(25, self.services.max_iterations * 4 + 10),
+                'recursion_limit': max(50, self.services.max_iterations * 20 + 20),
             }
 
     # --------------------------------------------------------------------------
@@ -129,11 +129,17 @@ class GraphRunner:
             self.services.check_output_path(Path(checklist_path))
             checklist_digest = state.get('checklist_digest')
             Checklist().restore(Path(checklist_path), checklist_digest)
+        elif state.get('checklist') is not None:
+            checklist = Checklist.from_dict(state['checklist'])
+            if not state.get('checklist_digest') or checklist.digest() != state['checklist_digest']:
+                raise ValueError('Checkpoint checklist digest does not match state')
     def resume_graph(self, state, feedback):
         """Recheck identity after waiting for feedback and resume the graph."""
         if state.get('identity') != self.workflow_identity():
             raise ValueError('Checkpoint workflow identity does not match the selected workflow')
         self.verify_candidate(state)
+        if history := state.get('plan_history'):
+            GraphNodes.write_plan_markdown(self.rundir, history, self.services.check_output_path)
         if candidate := state.get('candidate_path'):
             self.services.restore_candidate(candidate, state.get('validation'), state.get('candidate_digest'))
         return self.graph.invoke(
@@ -151,6 +157,12 @@ class GraphRunner:
         fallback = {'status': 'incomplete', 'reason': 'No result'}
         if state.get('response') is not None:
             fallback = {'status': 'incomplete', 'reason': 'No verified validation', 'response': state['response']}
+        if not state.get('result') and isinstance(state.get('checklist'), dict):
+            unresolved = [t['task_id'] for t in state['checklist'].get('tasks', []) if t.get('status') == 'unresolved']
+            if unresolved:
+                fallback = {'status': 'incomplete', 'reason': f'Unresolved DRC tasks: {", ".join(unresolved)}'}
+                if state.get('response') is not None:
+                    fallback['response'] = state['response']
         self.result = dict(state.get('result') or fallback)
         inputs = state.get('inputs') or {}
         self.result['run_id'] = inputs.get('run_id') or (self.rundir.parent.name if self.rundir.name == 'rundir' else self.thread_id)

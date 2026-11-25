@@ -514,11 +514,70 @@ class GraphNodes:
             task_context.append(item)
         return task_context
 
+    def advance_queue_item(self, state, status: str, reason: str, response=None) -> dict:
+        """Record terminal item outcome, pop current_task_id once, reset iteration, and advance."""
+        current_id = state.get('current_task_id')
+        queue = list(state.get('task_queue') or [])
+        if current_id in queue:
+            queue.remove(current_id)
+        elif queue:
+            queue.pop(0)
+
+        updates = {}
+        final_status = status
+        final_reason = reason
+        checklist_data = state.get('checklist')
+        if checklist_data is not None and current_id:
+            checklist = Checklist.from_dict(checklist_data)
+            task = next((t for t in checklist.tasks if t.get('task_id') == current_id), None)
+            if task is not None:
+                if task.get('status') in ('pending', 'in_progress') or status == 'unresolved':
+                    snapshot = checklist.update(task_id=current_id, status=status, reason=reason)
+                else:
+                    final_status = task.get('status', status)
+                    final_reason = task.get('reason') or reason
+                    snapshot = checklist.read()
+                updates['checklist'] = snapshot
+                updates['checklist_digest'] = snapshot['digest']
+                updates['checklist_path'] = self.write_checklist_artifact(snapshot)
+                checklist_data = snapshot
+
+        history = list(state.get('task_history') or [])
+        if current_id:
+            history.append({
+                'sequence': len(history) + 1,
+                'task_id': current_id,
+                'status': final_status,
+                'reason': final_reason,
+            })
+
+        next_id = queue[0] if queue else None
+        updates.update({
+            'task_queue': queue,
+            'current_task_id': next_id,
+            'task_history': history,
+            'iteration': 0,
+            'pending_tools': False,
+            'response': None if next_id else (response or {'decision': 'completed', 'status': 'incomplete', 'reason': final_reason}),
+        })
+        if next_id is None and checklist_data is not None:
+            unresolved = [t['task_id'] for t in checklist_data.get('tasks', []) if t.get('status') == 'unresolved']
+            if unresolved:
+                updates['result'] = {
+                    'status': 'incomplete',
+                    'reason': f'Unresolved DRC tasks: {", ".join(unresolved)}',
+                }
+        return updates
+
     def execute_agent(self, context, step):
         """Request a tool call or schema-valid response."""
         state = context.state
+        queue_mode = state.get('task_queue') is not None and state.get('current_task_id') is not None
         iteration = state.get('iteration', 0)
         if iteration >= self.services.max_iterations:
+            if queue_mode:
+                reason = f'{context.task}/{step.id}: iteration limit reached for {state["current_task_id"]}'
+                return self.advance_queue_item(state, 'unresolved', reason)
             reason = f'{context.task}/{step.id}: iteration limit reached'
             print(f'[ERROR] {reason}', file=sys.stderr)
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
@@ -532,6 +591,8 @@ class GraphNodes:
             goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
             agent_payload['current_checklist'] = state['checklist']
             agent_payload['goal'] = goal
+        if state.get('current_task_id') is not None:
+            agent_payload['current_task_id'] = state['current_task_id']
         if state.get('plan') is not None:
             agent_payload['plan'] = state['plan']
         active_plan = self.active_plan(state.get('plan_history', []))
@@ -546,33 +607,42 @@ class GraphNodes:
                 'role': 'user',
                 'content': json.dumps(agent_payload),
             })
-        message = self.services.chat(
-            request_messages,
-            self.agent_tool_specs(step, context.task, target_cell),
-            response_schema=getattr(step, 'schema', None),
-        )
-        self.last_conversation = [*request_messages, message]
-        calls = message.get('tool_calls')
-        updates = {'messages': [*messages, message], 'iteration': iteration + 1, 'pending_tools': bool(calls)}
-        if not calls:
-            response = json.loads(message['content'])
-            schema = getattr(step, 'schema', None) or self.services.workflow.response_schema
-            jsonschema.Draft202012Validator(schema).validate(response)
-            if state.get('checklist') is not None and response.get('decision') == 'completed':
-                summary = Checklist.from_dict(state['checklist']).summary()
-                counts = summary['counts']
-                if counts['pending'] > 0 or counts['in_progress'] > 0 or summary['stale'] > 0:
-                    updates['messages'].append({
-                        'role': 'user',
-                        'content': json.dumps({
-                            'error': 'Cannot complete repair while pending, in_progress, or stale checklist tasks remain.',
-                            'checklist_summary': summary,
-                        }),
-                    })
-                    updates['response'] = None
-                    return updates
-            updates.update(response=response, iteration=0)
-        return updates
+        try:
+            message = self.services.chat(
+                request_messages,
+                self.agent_tool_specs(step, context.task, target_cell),
+                response_schema=getattr(step, 'schema', None),
+            )
+            self.last_conversation = [*request_messages, message]
+            calls = message.get('tool_calls')
+            updates = {'messages': [*messages, message], 'iteration': iteration + 1, 'pending_tools': bool(calls)}
+            if not calls:
+                response = json.loads(message['content'])
+                schema = getattr(step, 'schema', None) or self.services.workflow.response_schema
+                jsonschema.Draft202012Validator(schema).validate(response)
+                if queue_mode:
+                    item_status = 'unresolved' if (response.get('decision') == 'stop' or response.get('status') == 'incomplete' and response.get('decision') != 'completed') else 'pass'
+                    adv = self.advance_queue_item(state, item_status, response.get('reason', ''), response=response)
+                    return {**updates, **adv}
+                if state.get('checklist') is not None and response.get('decision') == 'completed':
+                    summary = Checklist.from_dict(state['checklist']).summary()
+                    counts = summary['counts']
+                    if counts['pending'] > 0 or counts['in_progress'] > 0 or summary['stale'] > 0:
+                        updates['messages'].append({
+                            'role': 'user',
+                            'content': json.dumps({
+                                'error': 'Cannot complete repair while pending, in_progress, or stale checklist tasks remain.',
+                                'checklist_summary': summary,
+                            }),
+                        })
+                        updates['response'] = None
+                        return updates
+                updates.update(response=response, iteration=0)
+            return updates
+        except (ValueError, json.JSONDecodeError, jsonschema.ValidationError) as exc:
+            if not queue_mode:
+                raise
+            return self.advance_queue_item(state, 'unresolved', f'Invalid model response: {exc}')
 
     def agent_tool_specs(self, step, task, target_cell):
         specs = {name: spec.model_spec(name) for name, spec in step.tools.items()}
@@ -641,6 +711,12 @@ class GraphNodes:
                 invalid_reason = self.invalid_tool_result(name, result_payload)
                 if invalid_reason:
                     error = f'{context.task}/{step.id}/{name}: invalid result: {invalid_reason}'
+                    if context.state.get('task_queue') is not None and context.state.get('current_task_id') is not None:
+                        self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
+                        messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
+                        self.last_conversation = list(messages)
+                        adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error)
+                        return {**updates, **adv, 'messages': messages}
                     updates['tool_review'] = {
                         'tool': name, 'tool_call_id': call_id, 'arguments': arguments,
                         'task_id': arguments.get('task_id') if isinstance(arguments, dict) else None,
@@ -657,6 +733,12 @@ class GraphNodes:
                 payload = json.dumps({'error': error})
                 if trace_inst and tool_op:
                     trace_inst.finish_operation(tool_op, 'tool_call', status='failed', error=exc, outputs={'error': error})
+                if context.state.get('task_queue') is not None and context.state.get('current_task_id') is not None:
+                    self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
+                    messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
+                    self.last_conversation = list(messages)
+                    adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error)
+                    return {**updates, **adv, 'messages': messages}
                 call_args = arguments if isinstance(arguments, dict) else {}
                 relevant_vids = [call_args['task_id']] if 'task_id' in call_args else []
                 updates['tool_review'] = {
@@ -726,6 +808,8 @@ class GraphNodes:
             destination = 'END'
         elif state.get('pending_tools'):
             destination = f'{step.id}--tools'
+        elif step.action not in ('agent', 'review') and state.get('task_queue') is not None and len(state['task_queue']) == 0:
+            destination = 'END'
         elif step.action == 'agent' and state.get('response') is None:
             destination = self.node_name(step.id)
         elif step.action == 'review':
@@ -744,6 +828,8 @@ class GraphNodes:
             destination = f'{step.id}--tool-review'
         elif state.get('replan_context'):
             destination = self.node_name('plan')
+        elif state.get('task_queue') is not None and state.get('current_task_id') is None:
+            destination = self.node_name(step.next)
         else:
             destination = self.node_name(step.id)
         return self.trace_route(f'{step.id}--tools', step.id, state, destination)

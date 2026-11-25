@@ -40,6 +40,16 @@ class GraphBuilder:
                 routes.extend((node, tool_node))
                 graph.add_node(tool_node, partial(nodes.run_task_step, step=step, tools=True))
                 tool_routes = [END, node]
+                if step.next != 'END':
+                    tool_routes.append(nodes.node_name(step.next))
+                review_node = f'{step.id}--tool-review'
+                graph.add_node(review_node, nodes.review_tool)
+                graph.add_conditional_edges(
+                    review_node,
+                    partial(nodes.route_tool_review, step=step),
+                    [END, node, review_node],
+                )
+                tool_routes.append(review_node)
                 if any(s.id == 'plan' for s in steps):
                     tool_routes.append(nodes.node_name('plan'))
                 graph.add_conditional_edges(tool_node, partial(nodes.route_task_tools, step=step), list(dict.fromkeys(tool_routes)))
