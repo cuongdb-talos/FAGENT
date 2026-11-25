@@ -49,6 +49,28 @@ class DrcTools:
         if err:
             return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
 
+        from FAGENT.engine.graph_nodes import GraphNodes
+        from FAGENT.tasks.drc.rule_evidence import cover_requirements
+
+        if context.state.get('current_task_id') == task_id:
+            focused = GraphNodes(context.services).build_active_task_context(context.state, task_id)
+            region = focused.get('layout') or {}
+            coverage = cover_requirements(
+                focused.get('drc', {}).get('rule_evidence', {}), region, region.get('polygons', []), resolved['layout'],
+            )
+            if coverage is not None:
+                if coverage.get('reason'):
+                    return ToolResult({"status": "unknown", "reason": coverage['reason'], "proposals": []}, {})
+                expected = coverage['group_polygon_ids']
+                if (inner_id not in coverage['inner_ids'] or minimum_enclosure != 0
+                        or not isinstance(groups, list) or len(groups) != len(expected)
+                        or any(not isinstance(group, list) or not group or not set(group) <= set(allowed)
+                               for group, allowed in zip(groups, expected))):
+                    return ToolResult({
+                        "status": "rejected", "reason": "Use one group per required coverage condition",
+                        "coverage": coverage, "proposals": [],
+                    }, {})
+
         if minimum_enclosure is None:
             return ToolResult({"status": "unknown", "reason": "minimum_enclosure is required for a proposal", "proposals": []}, {})
 

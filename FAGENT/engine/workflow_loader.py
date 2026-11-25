@@ -98,10 +98,10 @@ class WorkflowLoader:
             for destination in destinations:
                 if destination not in ids | {'END'}:
                     raise ValueError(f'{identifier}: unknown route {destination}')
-            if action == 'review' and step.get('continue') not in ids:
+            if action == 'review' and 'router' not in step and step.get('continue') not in ids:
                 raise ValueError(f'{identifier}: invalid continue route {step.get("continue")}')
-            if action != 'review' and 'continue' in step:
-                raise ValueError(f'{identifier}: only review can declare a continue route')
+            if 'continue' in step and (action != 'review' or 'router' in step):
+                raise ValueError(f'{identifier}: continue is only valid for review without a router')
             if action != 'agent' and 'tools' in step:
                 raise ValueError(f'{identifier}: only agent can declare tools')
             bindings = step.get('tools', []) if action == 'agent' else []

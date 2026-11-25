@@ -4,6 +4,8 @@ from collections import defaultdict
 
 from shapely.geometry import Polygon
 
+from FAGENT.tasks.drc.rule_evidence import cover_requirements
+
 
 def build_request(state: dict, node_prompt: str, services, focused: dict | None) -> dict:
     """Project focused DRC evidence onto the repair prompt's input contract."""
@@ -32,7 +34,11 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
                      'line_end': evidence.get('line_end'),
                      'mapping_diagnostics': evidence.get('mapping_diagnostics', {})},
     }
-    polygons = [_polygon(item, names) for item in layout.get('polygons', [])]
+    raw_polygons = layout.get('polygons', [])
+    coverage = cover_requirements(evidence, layout, raw_polygons, getattr(services, 'layout', None))
+    if coverage is not None:
+        violation['coverage'] = coverage
+    polygons = [_polygon(item, names) for item in raw_polygons]
     present_lpps = {tuple(polygon['lpp']) for polygon in polygons}
     layer_status = {}
     for name, lpp in layer_map.items():
@@ -51,10 +57,13 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
     library = getattr(getattr(services, 'layout', None), 'library', None)
     unit = getattr(library, 'unit', None)
     precision = getattr(library, 'precision', None)
+    review = state.get('review') or {}
+    review_input = {'review_feedback': review['feedback']} if review.get('decision') == 'continue' else {}
     return {
         'system': '\n\n'.join(part for part in (node_prompt, policy) if part),
         'user': {
             'task_id': state.get('current_task_id'),
+            **review_input,
             'cell': layout.get('cell'),
             'unit': 'um' if unit == 1e-6 else (f'{unit:g} m' if unit else None),
             'grid': precision / unit if unit and precision else None,

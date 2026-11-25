@@ -308,3 +308,36 @@ def record_repeated_proposal(context):
 
 def queue_route(context):
     return 'finished' if context.state.get('current_task_id') is None else 'continue'
+
+
+def human_review_route(context):
+    return context.state['review']['decision']
+
+
+def resume_repair(context):
+    """Retry unresolved markers on the saved candidate with the user's feedback."""
+    state = context.state
+    checklist = Checklist.from_dict(state['checklist'])
+    queue = [task['task_id'] for task in checklist.tasks if task['status'] == 'unresolved']
+    if not queue:
+        return {}
+    for task_id in queue:
+        checklist.update(task_id, 'pending')
+    snapshot = checklist.read()
+    path = Path(context.services.rundir) / 'checklist.json'
+    context.services.check_output_path(path)
+    checklist.save(path)
+    return {
+        'checklist': snapshot,
+        'checklist_digest': snapshot['digest'],
+        'checklist_path': str(path),
+        'task_queue': queue,
+        'current_task_id': queue[0],
+        'task_message_start': len(state.get('messages') or []),
+        'task_transactions': {},
+        'task_checks': {},
+        'proposals': {},
+        'iteration': 0,
+        'result': None,
+        'save_completed': False,
+    }

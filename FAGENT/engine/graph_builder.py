@@ -30,13 +30,16 @@ class GraphBuilder:
         for step in steps:
             node = nodes.node_name(step.id)
             graph.add_node(node, partial(nodes.run_task_step, step=step))
-            configured_routes = [nodes.node_name(target) for target in getattr(step, 'routes', {}).values()]
+            configured_routes = [
+                END if target == 'END' else nodes.node_name(target)
+                for target in getattr(step, 'routes', {}).values()
+            ]
             routes = [END, *configured_routes]
             if step.next != 'END':
                 routes.append(nodes.node_name(step.next))
             if not configured_routes and any(getattr(s, 'id', None) == 'save' for s in steps) and step.id != 'save':
                 routes.append(nodes.node_name('save'))
-            if step.action == 'review':
+            if step.action == 'review' and not configured_routes:
                 routes.extend((node, nodes.node_name(step.continue_to)))
             if step.action == 'agent':
                 tool_node = f'{step.id}--tools'

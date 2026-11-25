@@ -1175,9 +1175,9 @@ class GraphNodes:
             destination = f'{step.id}--tools'
         elif getattr(step, 'router', None):
             destination = self.configured_destination(state, step)
-        elif step.action not in ('agent', 'review') and state.get('task_queue') is not None and len(state['task_queue']) == 0:
+        elif step.id != 'save' and step.action not in ('agent', 'review') and state.get('task_queue') is not None and len(state['task_queue']) == 0:
             has_save = any(getattr(s, 'id', None) == 'save' for s in (getattr(self.services.workflow, 'steps', None) or ()))
-            destination = self.node_name('save') if (has_save and step.id != 'save') else 'END'
+            destination = self.node_name('save') if (has_save) else 'END'
         elif step.action == 'agent' and state.get('response') is None:
             destination = self.node_name(step.id)
         elif step.action == 'review':

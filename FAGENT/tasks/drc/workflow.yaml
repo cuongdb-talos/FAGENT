@@ -43,6 +43,19 @@ nodes:
     finished: save
 - id: save
   action: steps:save_gds
-  next: END
+  next: human_review
+- id: human_review
+  action: review
+  router: steps:human_review_route
+  routes:
+    stop: END
+    continue: resume_repair
+    unclear: human_review
+- id: resume_repair
+  action: steps:resume_repair
+  router: steps:queue_route
+  routes:
+    continue: repair
+    finished: human_review
 prepare: steps:prepare
 layout_services: true

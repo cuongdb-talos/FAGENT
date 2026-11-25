@@ -489,7 +489,12 @@ class GraphServices:
             return {'decision': feedback.strip().lower()}
         messages = [
             {'role': 'system', 'content': self.workflow.review_text},
-            {'role': 'user', 'content': json.dumps({'feedback': feedback, 'validation': state.get('validation')})},
+            {'role': 'user', 'content': json.dumps({
+                'feedback': feedback,
+                'validation': state.get('validation'),
+                'result': state.get('result'),
+                'checklist': state.get('checklist'),
+            })},
         ]
         response = self.client.chat(messages, (), self.workflow.feedback_schema)
         return json.loads(response['content'])
