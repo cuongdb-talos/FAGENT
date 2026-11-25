@@ -98,7 +98,9 @@ class WorkflowLoader:
             if action != 'agent' and 'tools' in step:
                 raise ValueError(f'{identifier}: only agent can declare tools')
             bindings = step.get('tools', []) if action == 'agent' else []
-            if action not in {'agent', 'plan', 'review'}:
+            if isinstance(action, list):
+                bindings = list(action)
+            elif action not in {'agent', 'plan', 'review'}:
                 bindings = [action]
             for reference in bindings:
                 match = re.fullmatch(r'([a-zA-Z_][a-zA-Z0-9_]*):([a-zA-Z_][a-zA-Z0-9_]*)', reference)
@@ -159,9 +161,19 @@ class WorkflowLoader:
                     step_prompt = self._read_local(directory, f'prompts/{step["id"]}.md', sources).decode()
                 if step['action'] == 'plan' and (step_schema is None or not step_prompt):
                     raise ValueError('Plan step requires step-local prompt and schema')
-                if step['action'] not in {'agent', 'plan', 'review'}:
+                if isinstance(step['action'], list):
+                    bound_actions = []
+                    for reference in step['action']:
+                        bound = self._bind(directory, reference, references, sources, modules)
+                        self._check_signature(bound)
+                        bound_actions.append(bound)
+                    functions = tuple(bound_actions)
+                elif step['action'] not in {'agent', 'plan', 'review'}:
                     function = self._bind(directory, step['action'], references, sources, modules)
                     self._check_signature(function)
+                    functions = (function,)
+                else:
+                    functions = ()
                 for reference in step.get('tools', ()):
                     target = self._bind(directory, reference, references, sources, modules)
                     name = references[reference][1]
@@ -180,6 +192,7 @@ class WorkflowLoader:
                     **step,
                     'continue_to': step.get('continue'),
                     'function': function,
+                    'functions': functions,
                     'tools': tools,
                     'schema': step_schema,
                     'prompt': step_prompt,
