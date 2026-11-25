@@ -19,53 +19,33 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
 
     marker = drc.get('marker_user') or []
     bounds = _bounds(marker)
-    minimum = evidence.get('required_area_user')
     violation = {
         'rule': focused.get('task', {}).get('rule'),
-        'type': evidence.get('rule_type'),
-        'target_layer': evidence.get('target_layer'),
+        'description': drc.get('rule_description'),
         'rule_text': evidence.get('rule_text'),
-        'requirement': {
-            'min_area': minimum, 'min_width': None, 'min_spacing': None,
-            'min_enclosure': evidence.get('required_enclosure_user'),
-        },
-        'exception_layers': evidence.get('exception_regions') if evidence.get('found') else None,
         'marker_bbox': bounds,
-        'marker_metrics': _metrics(marker, bounds, minimum),
+        'marker_metrics': _metrics(marker, bounds),
         'marker_points': marker,
         'evidence': {'status': drc.get('status', 'unavailable'),
-                     'supported': evidence.get('supported', False),
                      'reason': drc.get('reason') or evidence.get('reason'),
                      'deck_file': evidence.get('deck_file'), 'line_start': evidence.get('line_start'),
-                     'layer_mapping_provenance': evidence.get('layer_mapping_provenance', {})},
+                     'line_end': evidence.get('line_end'),
+                     'mapping_diagnostics': evidence.get('mapping_diagnostics', {})},
     }
-    cover_groups = evidence.get('cover_groups')
-    if cover_groups is not None:
-        violation['cover_groups'] = cover_groups
     polygons = [_polygon(item, names) for item in layout.get('polygons', [])]
-    if evidence.get('supported') and cover_groups:
-        editable_ids = defaultdict(list)
-        for polygon in polygons:
-            if polygon['editable']:
-                editable_ids[tuple(polygon['lpp'])].append(polygon['id'])
-        candidates = {
-            'inner_ids': editable_ids[tuple(layer_map[evidence['target_layer']])],
-            'group_polygon_ids': [
-                list(dict.fromkeys(
-                    pid for layer in group for pid in editable_ids[tuple(layer_map[layer])]
-                ))
-                for group in cover_groups
-            ],
-        }
-        groups = candidates['group_polygon_ids']
-        if len(candidates['inner_ids']) == 1 and all(len(group) == 1 for group in groups):
-            candidates['propose_arguments'] = {
-                'task_id': state.get('current_task_id'),
-                'action': 'propose',
-                'inner_id': candidates['inner_ids'][0],
-                'groups': groups,
-            }
-        violation['fix_cover_candidates'] = candidates
+    present_lpps = {tuple(polygon['lpp']) for polygon in polygons}
+    layer_status = {}
+    for name, lpp in layer_map.items():
+        if tuple(lpp) in present_lpps:
+            status = 'present'
+        elif layout.get('complete') and (layout.get('search_region') or {}).get('bounds_user'):
+            status = 'empty'
+        else:
+            status = 'unknown'
+        layer_status[name] = status
+    diagnostics = evidence.get('mapping_diagnostics') or {}
+    for name in diagnostics.get('ambiguous_layers', {}):
+        layer_status[name] = 'unknown'
     cfg = state.get('drc_context') or {}
     policy = services.build_system_message(goal=cfg.get('goal'), constraints=(cfg.get('knowledge') or {}).get('constraints'))
     library = getattr(getattr(services, 'layout', None), 'library', None)
@@ -85,6 +65,7 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
                 'complete': layout.get('complete', False),
                 'candidate_digest': layout.get('candidate_digest'),
                 'polygons': polygons,
+                'layer_status_in_search_region': layer_status,
                 'references_in_region': layout.get('references_in_region', []),
                 'paths_in_region': layout.get('paths_in_region', []),
                 'reason': layout.get('reason'),
@@ -101,14 +82,13 @@ def _bounds(points):
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
-def _metrics(points, bounds, minimum=None):
+def _metrics(points, bounds):
     if bounds is None:
         return {}
     x0, y0, x1, y1 = bounds
     shape = Polygon(points) if len(points) >= 3 else None
     area = shape.area if shape is not None and shape.is_valid else None
-    return {'w': x1 - x0, 'h': y1 - y0, 'area': area,
-            'deficit': max(0, minimum - area) if minimum is not None and area is not None else None}
+    return {'w': x1 - x0, 'h': y1 - y0, 'area': area}
 
 
 def _polygon(item, names):

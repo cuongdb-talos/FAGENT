@@ -9,7 +9,6 @@ from FAGENT.capabilities.layout.cover_check import AreaCheck, CoverCheck
 from FAGENT.capabilities.layout.repair_proposals import AreaProposalBuilder, CoverProposalBuilder
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
-from FAGENT.tasks.drc.rule_evidence import RuleEvidence
 
 
 # === SECTION 2: Five-Tool DRC Handler Class ===
@@ -38,6 +37,7 @@ class DrcTools:
         inner_id: str | None = None,
         groups: list[list[str]] | None = None,
         proposal_id: str | None = None,
+        minimum_enclosure: float | None = None,
     ) -> ToolResult:
         """Propose or atomically apply a cover repair using model-selected polygon IDs."""
         if action not in ("propose", "apply"):
@@ -49,12 +49,8 @@ class DrcTools:
         if err:
             return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
 
-        rule_ev = resolved["rule_evidence"]
-        min_enc = rule_ev.get("required_enclosure_user")
-        if min_enc is None and rule_ev.get("required_enclosure_dbu") is not None:
-            min_enc = float(rule_ev["required_enclosure_dbu"]) * resolved["grid"]
-        if min_enc is None:
-            return ToolResult({"status": "unknown", "reason": "Missing minimum enclosure in rule evidence", "proposals": []}, {})
+        if minimum_enclosure is None:
+            return ToolResult({"status": "unknown", "reason": "minimum_enclosure is required for a proposal", "proposals": []}, {})
 
         if not inner_id or not isinstance(groups, list) or not groups or any(not g for g in groups):
             return ToolResult({"status": "unknown", "reason": "inner_id and non-empty groups are required", "proposals": []}, {})
@@ -67,27 +63,13 @@ class DrcTools:
         except (KeyError, ValueError, TypeError) as exc:
             return ToolResult({"status": "unknown", "reason": f"Unknown polygon_id: {exc}", "proposals": []}, {})
 
-        cover_groups = rule_ev.get("cover_groups")
-        if cover_groups is not None:
-            mapping = rule_ev["layer_mapping"]
-            inner_layer = mapping[rule_ev["target_layer"]]
-            allowed_groups = [
-                {(mapping[name]["layer"], mapping[name]["datatype"]) for name in group}
-                for group in cover_groups
-            ]
-            if (inner.layer, inner.datatype) != (inner_layer["layer"], inner_layer["datatype"]):
-                return ToolResult({"status": "unknown", "reason": "inner_id must belong to the rule target layer", "proposals": []}, {})
-            if len(cover_polygons) != len(allowed_groups) or any(
-                (poly.layer, poly.datatype) not in allowed
-                for group, allowed in zip(cover_polygons, allowed_groups)
-                for poly in group
-            ):
-                return ToolResult({"status": "unknown", "reason": "Polygon groups must match the rule cover_groups", "proposals": []}, {})
+        if any(inner_id in group for group in groups):
+            return ToolResult({"status": "unknown", "reason": "Cover groups cannot contain the inner polygon", "proposals": []}, {})
 
         built = CoverProposalBuilder().run(
             inner_points=inner.points.tolist(),
             groups=[[poly.points.tolist() for poly in group] for group in cover_polygons],
-            minimum_enclosure=float(min_enc),
+            minimum_enclosure=float(minimum_enclosure),
             grid=resolved["grid"],
             inner_id=inner_id,
             group_ids=groups,
@@ -98,7 +80,7 @@ class DrcTools:
             task_id=task_id,
             kind="cover",
             built=built,
-            bound_inputs={"inner_id": inner_id, "groups": groups, "minimum_enclosure": float(min_enc)},
+            bound_inputs={"inner_id": inner_id, "groups": groups, "minimum_enclosure": float(minimum_enclosure)},
         )
 
     def fix_area(
@@ -119,14 +101,8 @@ class DrcTools:
         if err:
             return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
 
-        rule_ev = resolved["rule_evidence"]
-        if rule_ev.get("rule_type") not in (None, "area"):
-            return ToolResult({"status": "unknown", "reason": "Rule evidence does not describe an area rule", "proposals": []}, {})
-        min_area = minimum_area if minimum_area is not None else (
-            rule_ev.get("minimum_area_user") if rule_ev.get("minimum_area_user") is not None else rule_ev.get("required_area_user")
-        )
-        if min_area is None:
-            return ToolResult({"status": "unknown", "reason": "Missing minimum_area in arguments or rule evidence", "proposals": []}, {})
+        if minimum_area is None:
+            return ToolResult({"status": "unknown", "reason": "minimum_area is required for a proposal", "proposals": []}, {})
         if not polygon_id:
             return ToolResult({"status": "unknown", "reason": "polygon_id is required", "proposals": []}, {})
 
@@ -139,7 +115,7 @@ class DrcTools:
 
         built = AreaProposalBuilder().run(
             polygon_points=poly_pts,
-            minimum_area=float(min_area),
+            minimum_area=float(minimum_area),
             grid=resolved["grid"],
             polygon_id=polygon_id,
         )
@@ -149,7 +125,7 @@ class DrcTools:
             task_id=task_id,
             kind="area",
             built=built,
-            bound_inputs={"polygon_id": polygon_id, "minimum_area": float(min_area)},
+            bound_inputs={"polygon_id": polygon_id, "minimum_area": float(minimum_area)},
         )
 
     def check_cover(context, task_id: str) -> ToolResult:
@@ -187,47 +163,14 @@ class DrcTools:
     # Internal Transaction & Resolution Helpers
     # --------------------------------------------------------------------------
     def _resolve_task_context(context, task_id: str) -> tuple[dict | None, str | None]:
-        """Resolve task, rule evidence, physical layer mapping, cell, and GDS grid."""
+        """Resolve the task, candidate layout, target cell, and GDS grid."""
         checklist = context.state.get("checklist") or {}
         task = next((t for t in checklist.get("tasks", []) if t.get("task_id") == task_id), None)
         if task is None:
             return None, f"Unknown task_id: {task_id}"
 
-        drc_ctx = context.state.get("drc_context") or {}
-        rule_name = task.get("rule")
-        layer_map = drc_ctx.get("layer_mapping") or {}
-        rule_ev_map = drc_ctx.get("rule_evidence") or {}
-        rule_ev = rule_ev_map.get(rule_name)
-
         layout = context.services.layout
         layout.load_library()
-
-        if rule_ev is None and not rule_ev_map:
-            cfg = getattr(context.services, "config", None) or {}
-            input_sources = getattr(context.services, "input_sources", None) or {}
-            gds_data = getattr(layout, "gds_data", None) or {}
-            deck_paths = (
-                getattr(context.services, "drc_files", None)
-                or input_sources.get("decks")
-                or cfg.get("drc_files", [])
-            )
-            layer_maps = (
-                getattr(context.services, "layer_maps", None)
-                or input_sources.get("layer_maps")
-                or gds_data.get("layer_maps")
-                or cfg.get("layer_maps", [])
-                or cfg.get("layer_map_files", [])
-            )
-            if deck_paths:
-                rule_ev = RuleEvidence().run(task=task, deck_paths=deck_paths, layer_maps=layer_maps)
-                if not layer_map:
-                    layer_map = rule_ev.get("layer_mapping") or {}
-
-        if not layer_map:
-            return None, "Missing physical layer_mapping"
-        if not rule_ev or rule_ev.get("supported") is False:
-            reason = (rule_ev or {}).get("reason") or f"Unsupported or missing rule evidence for {rule_name}"
-            return None, reason
         cell_name = (
             task.get("cell")
             or (context.state.get("report") or {}).get("top_cell")
@@ -240,8 +183,6 @@ class DrcTools:
         digest = context.state.get("candidate_digest") or GraphServices.candidate_digest(Path(layout.gds_path))
         return {
             "task": task,
-            "rule_evidence": rule_ev,
-            "layer_mapping": layer_map,
             "layout": layout,
             "cell_name": cell_name,
             "grid": grid,
@@ -388,24 +329,17 @@ class DrcTools:
         cell_name = tx["cell_name"]
         grid = resolved["grid"]
         bound = tx.get("bound_inputs", {})
-        rule_ev = resolved["rule_evidence"]
 
         if expected_kind == "cover":
-            min_enc = rule_ev.get("required_enclosure_user")
-            if min_enc is None:
-                min_enc = bound.get("minimum_enclosure", 0.0)
             inner_pts = layout.polygon_ids.resolve(cell_name, bound["inner_id"]).points.tolist()
             group_pts = [
                 [layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in grp]
                 for grp in bound["groups"]
             ]
-            res = CoverCheck().run(inner=inner_pts, groups=group_pts, minimum=float(min_enc), precision=grid)
+            res = CoverCheck().run(inner=inner_pts, groups=group_pts, minimum=bound["minimum_enclosure"], precision=grid)
         else:
-            min_area = rule_ev.get("minimum_area_user")
-            if min_area is None:
-                min_area = bound.get("minimum_area", 0.0)
             poly_pts = layout.polygon_ids.resolve(cell_name, bound["polygon_id"]).points.tolist()
-            res = AreaCheck().run(polygon=poly_pts, minimum_area=float(min_area), precision=grid)
+            res = AreaCheck().run(polygon=poly_pts, minimum_area=bound["minimum_area"], precision=grid)
 
         checks_map = copy.deepcopy(context.state.get("task_checks") or {})
         current_digest = context.state.get("candidate_digest")
@@ -478,19 +412,23 @@ class DrcTools:
 fix_cover = DrcTools.fix_cover
 fix_cover.task_tool = ToolSpec(
     function=fix_cover,
-    description="Propose or apply a cover repair. For propose, use literal layout polygon IDs in inner_id and groups.",
+    description="Propose a cover repair from model-selected polygon IDs and a model-derived uniform enclosure, or apply a staged proposal.",
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string"},
+            "task_id": {"type": "string", "description": "Use the current input task_id."},
             "action": {"type": "string", "enum": ["propose", "apply"]},
+            "minimum_enclosure": {
+                "type": "number", "minimum": 0,
+                "description": "Model-derived uniform minimum enclosure in GDS user units for propose.",
+            },
             "inner_id": {"type": "string", "description": "Editable inner polygon ID from layout.polygons[].id."},
             "groups": {
                 "type": "array",
-                "description": "Ordered groups of editable polygon IDs from layout.polygons[].id.",
+                "description": "Ordered groups of editable polygon IDs. Each group is a union that must cover the inner polygon.",
                 "items": {"type": "array", "items": {"type": "string"}},
             },
-            "proposal_id": {"type": "string"},
+            "proposal_id": {"type": "string", "description": "For apply, use the ID returned by a suitable proposal from this tool."},
         },
         "required": ["task_id", "action"],
         "additionalProperties": False,
@@ -500,15 +438,19 @@ fix_cover.task_tool = ToolSpec(
 fix_area = DrcTools.fix_area
 fix_area.task_tool = ToolSpec(
     function=fix_area,
-    description="Propose or apply an area repair for a task using a model-selected polygon_id and minimum_area.",
+    description=(
+        "Repair a minimum-area violation using the area inferred from the current rule text. "
+        "Propose with polygon_id and minimum_area. Apply a suitable proposal with the returned proposal_id, "
+        "then call check_area after successful apply. Use GDS user units."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string"},
+            "task_id": {"type": "string", "description": "Use the current input task_id."},
             "action": {"type": "string", "enum": ["propose", "apply"]},
-            "polygon_id": {"type": "string"},
-            "minimum_area": {"type": "number"},
-            "proposal_id": {"type": "string"},
+            "polygon_id": {"type": "string", "description": "For propose, select the editable ID from layout.polygons[].id that matches the marker and target layer."},
+            "minimum_area": {"type": "number", "description": "For propose, provide the minimum area inferred from the rule text in squared GDS user units."},
+            "proposal_id": {"type": "string", "description": "For apply, use the ID returned by a suitable proposal from this tool."},
         },
         "required": ["task_id", "action"],
         "additionalProperties": False,
@@ -518,11 +460,15 @@ fix_area.task_tool = ToolSpec(
 check_cover = DrcTools.check_cover
 check_cover.task_tool = ToolSpec(
     function=check_cover,
-    description="Check staged cover edits for a task against bound inputs; rolls back task edits on failure.",
+    description=(
+        "After successful fix_cover apply, check the staged edit against its bound inputs. "
+        "Evaluate the entire selected inner polygon, including portions within exception layers. "
+        "A failed check rolls back the edit. The local result has deck_clean: false."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string"},
+            "task_id": {"type": "string", "description": "Use the current input task_id."},
         },
         "required": ["task_id"],
         "additionalProperties": False,
@@ -532,11 +478,14 @@ check_cover.task_tool = ToolSpec(
 check_area = DrcTools.check_area
 check_area.task_tool = ToolSpec(
     function=check_area,
-    description="Check staged area edit for a task against minimum_area; rolls back task edit on failure.",
+    description=(
+        "After successful fix_area apply, check the staged edit against minimum_area. "
+        "A failed check rolls back the edit. The local result has deck_clean: false."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string"},
+            "task_id": {"type": "string", "description": "Use the current input task_id."},
         },
         "required": ["task_id"],
         "additionalProperties": False,
@@ -546,7 +495,7 @@ check_area.task_tool = ToolSpec(
 save_gds = DrcTools.save_gds
 save_gds.task_tool = ToolSpec(
     function=save_gds,
-    description="Save the final verified candidate GDS after all queued tasks are complete.",
+    description="Save the final candidate GDS after queue completion. The workflow save node handles this after marker processing.",
     parameters={
         "type": "object",
         "properties": {},

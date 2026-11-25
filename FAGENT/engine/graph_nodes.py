@@ -590,36 +590,44 @@ class GraphNodes:
         report = state.get('report') or {}
         target_cell = report.get('top_cell') if context.task == 'drc' else None
         try:
-            request_messages, _agent_payload = self.build_model_request(state, node_prompt=node_prompt, step_id=step.id, task_name=context.task)
-            message = self.services.chat(
-                request_messages,
-                self.agent_tool_specs(step, context.task, target_cell),
-                response_schema=getattr(step, 'schema', None),
+            tool_specs = self.agent_tool_specs(step, context.task, target_cell)
+            response_schema = getattr(step, 'schema', None)
+            requires_check = queue_mode and context.task == 'drc' and any(
+                f'fix_{kind}' in step.tools and f'check_{kind}' in step.tools
+                for kind in ('area', 'cover')
             )
+            verified_pass = False
+            if requires_check:
+                task_id = state['current_task_id']
+                candidate_digest = state.get('candidate_digest')
+                check = (state.get('task_checks') or {}).get(task_id) or {}
+                verified_pass = bool(
+                    candidate_digest and check.get('status') == 'pass'
+                    and check.get('candidate_digest') == candidate_digest
+                )
+                tool_specs, response_schema = self.drc_repair_schemas(
+                    state, tool_specs, response_schema or self.services.workflow.response_schema,
+                    verified_pass,
+                )
+            request_messages, _agent_payload = self.build_model_request(
+                state, node_prompt=node_prompt, step_id=step.id, task_name=context.task,
+            )
+            message = self.services.chat(request_messages, tool_specs, response_schema=response_schema)
             self.last_conversation = [*request_messages, message]
             calls = message.get('tool_calls')
             updates = {'messages': [*messages, message], 'iteration': iteration + 1, 'pending_tools': bool(calls)}
             if not calls:
                 response = json.loads(message['content'])
-                schema = getattr(step, 'schema', None) or self.services.workflow.response_schema
+                schema = self.services.workflow.response_schema if response_schema is None else response_schema
                 jsonschema.Draft202012Validator(schema).validate(response)
                 if queue_mode:
-                    current_id = state['current_task_id']
-                    requires_check = context.task == 'drc' and (
-                        'check_cover' in step.tools or 'check_area' in step.tools
-                    )
                     agent_stopped = response.get('decision') == 'stop' or (
                         response.get('status') == 'incomplete' and response.get('decision') != 'completed'
                     )
                     if requires_check:
-                        check_rec = (state.get('task_checks') or {}).get(current_id) or {}
-                        verified_pass = (
-                            check_rec.get('status') == 'pass'
-                            and check_rec.get('candidate_digest') == state.get('candidate_digest')
-                        )
                         item_status = 'pass' if (verified_pass and not agent_stopped) else 'unresolved'
                         item_reason = response.get('reason', '') if (item_status == 'pass' or agent_stopped) else (
-                            response.get('reason') or 'Unverified completion: missing passing local check tied to current candidate'
+                            'Unverified completion: missing passing local check tied to current candidate'
                         )
                     else:
                         item_status = 'unresolved' if agent_stopped else 'pass'
@@ -672,6 +680,56 @@ class GraphNodes:
         specs['read_gds'] = read_gds
         return list(specs.values())
 
+    def drc_repair_schemas(self, state, tool_specs, response_schema, verified_pass):
+        """Expose operations for the current proposal, apply, or verification stage."""
+        task_id = state['current_task_id']
+        response_schema = deepcopy(response_schema)
+        response_schema['properties']['decision']['enum'] = ['completed'] if verified_pass else ['stop']
+        response_schema['properties']['status']['enum'] = ['verified'] if verified_pass else ['incomplete']
+        if verified_pass:
+            return [], response_schema
+
+        specs = {spec['function']['name']: spec for spec in deepcopy(tool_specs)}
+        transaction = (state.get('task_transactions') or {}).get(task_id)
+        if transaction:
+            name = f"check_{transaction['kind']}"
+            spec = specs[name]
+            spec['function']['parameters']['properties']['task_id']['const'] = task_id
+            return [spec], False
+
+        proposals = state.get('proposals') or {}
+        candidate_digest = state.get('candidate_digest')
+        if proposals and not candidate_digest:
+            # Initial proposals may be based on the original input before a candidate exists.
+            candidate_digest = self.services.candidate_digest(Path(self.services.layout.gds_path))
+        proposal_ids = {}
+        for proposal_id, proposal in proposals.items():
+            if (candidate_digest and proposal.get('task_id') == task_id
+                    and proposal.get('candidate_digest') == candidate_digest):
+                proposal_ids.setdefault(proposal['kind'], []).append(proposal_id)
+
+        repairs = []
+        propose_fields = {
+            'area': ('polygon_id', 'minimum_area'),
+            'cover': ('inner_id', 'groups', 'minimum_enclosure'),
+        }
+        for kind, fields in propose_fields.items():
+            spec = specs.get(f'fix_{kind}')
+            if spec is None or (proposal_ids and kind not in proposal_ids):
+                continue
+            applying = kind in proposal_ids
+            parameters = spec['function']['parameters']
+            properties = parameters['properties']
+            required = ['task_id', 'action', *(['proposal_id'] if applying else fields)]
+            parameters['properties'] = {key: properties[key] for key in required}
+            parameters['required'] = required
+            properties['task_id']['const'] = task_id
+            properties['action']['enum'] = ['apply'] if applying else ['propose']
+            if applying:
+                properties['proposal_id']['enum'] = proposal_ids[kind]
+            repairs.append(spec)
+        return repairs, response_schema
+
     def build_model_request(
         self,
         state: dict,
@@ -693,12 +751,13 @@ class GraphNodes:
                 raise ValueError('Request builder must return system and user fields')
             if not isinstance(request['system'], str) or not isinstance(request['user'], dict):
                 raise ValueError('Request builder must return system text and a user object')
+            payload = request['user']
             history = self._select_task_messages(messages, state.get('task_message_start', 0))
             return [
                 {'role': 'system', 'content': request['system']},
-                {'role': 'user', 'content': json.dumps(request['user'], allow_nan=False)},
+                {'role': 'user', 'content': json.dumps(payload, allow_nan=False)},
                 *(message for message in history if message.get('role') in ('assistant', 'tool')),
-            ], request['user']
+            ], payload
 
         agent_payload = {}
         if node_prompt:
@@ -795,6 +854,10 @@ class GraphNodes:
         bounds_user = self._marker_bounds_user(points_user, margin_user) if (points_user and margin_user is not None) else None
 
         rule_evidence = self._build_rule_evidence(task)
+        rule_description = next(
+            (rule.get('description') for rule in report.get('rules', []) or [] if rule.get('name') == rule_name),
+            None,
+        )
         drc_available = bool(marker is not None and valid_scale and rule_evidence.get('found'))
         drc_reasons = []
         if marker is None:
@@ -820,6 +883,7 @@ class GraphNodes:
                 'marker_dbu': points_dbu,
                 'marker_user': points_user,
                 'rule_evidence': rule_evidence,
+                'rule_description': rule_description,
                 'status': 'available' if drc_available else 'unavailable',
                 'reason': '; '.join(drc_reasons),
             },
@@ -876,7 +940,6 @@ class GraphNodes:
                 'layer_mapping': {},
                 'layer_mapping_provenance': {},
                 'mapping_diagnostics': {'missing_sources': [], 'ambiguous_layers': {}, 'non_drawing_entries': {}},
-                'supported': False,
                 'reason': 'Missing rule name for active task',
             }
         sources = getattr(self.services, 'input_sources', None) or {}
@@ -887,20 +950,6 @@ class GraphNodes:
         layer_maps = sources.get('layer_maps') or config.get('layer_map_files') or []
         if isinstance(layer_maps, (str, Path)):
             layer_maps = [layer_maps]
-        if not decks:
-            return {
-                'rule': rule_name,
-                'found': False,
-                'deck_file': None,
-                'line_start': None,
-                'line_end': None,
-                'rule_text': '',
-                'layer_mapping': {},
-                'layer_mapping_provenance': {},
-                'mapping_diagnostics': {'missing_sources': [], 'ambiguous_layers': {}, 'non_drawing_entries': {}},
-                'supported': False,
-                'reason': 'No DRC rule deck configured',
-            }
         return RuleEvidence().run({'rule': rule_name}, deck_paths=list(decks), layer_maps=list(layer_maps))
 
     def _build_layout_region_context(self, state: dict, bounds_user, margin_user, margin_dbu: float) -> dict:
@@ -1107,6 +1156,16 @@ class GraphNodes:
 
     node_name = staticmethod(node_name)
 
+    def configured_destination(self, state, step):
+        context = TaskContext(
+            self.services.workflow.task, state.get('inputs', {}),
+            {**state.get('task_state', {}), **state}, self.services,
+        )
+        key = step.router(context)
+        if not isinstance(key, str) or key not in step.routes:
+            raise ValueError(f'{step.id}: unknown route key {key!r}')
+        return self.node_name(step.routes[key])
+
     def route_task_step(self, state, step):
         """Follow the successful route or terminate after a failure."""
         destination = self.node_name(step.next)
@@ -1114,6 +1173,8 @@ class GraphNodes:
             destination = 'END'
         elif state.get('pending_tools'):
             destination = f'{step.id}--tools'
+        elif getattr(step, 'router', None):
+            destination = self.configured_destination(state, step)
         elif step.action not in ('agent', 'review') and state.get('task_queue') is not None and len(state['task_queue']) == 0:
             has_save = any(getattr(s, 'id', None) == 'save' for s in (getattr(self.services.workflow, 'steps', None) or ()))
             destination = self.node_name('save') if (has_save and step.id != 'save') else 'END'
@@ -1133,6 +1194,8 @@ class GraphNodes:
             destination = 'END'
         elif state.get('tool_review'):
             destination = f'{step.id}--tool-review'
+        elif getattr(step, 'router', None):
+            destination = self.configured_destination(state, step)
         elif state.get('replan_context'):
             destination = self.node_name('plan')
         elif state.get('task_queue') is not None and state.get('current_task_id') is None:

@@ -1,5 +1,6 @@
 task: drc
-version: 1
+version: 2
+entry: read
 request_builder: model_payload:build_request
 prompts:
 - prompts/repair.md
@@ -20,13 +21,26 @@ nodes:
   next: repair
 - id: repair
   action: agent
-  next: save
+  router: steps:repair_route
+  routes:
+    continue: repair
+    verify: verify
+    repeated: record_unresolved
+    finished: save
   tools:
   - tools:fix_cover
   - tools:fix_area
   - tools:check_cover
   - tools:check_area
-  - tools:save_gds
+- id: verify
+  action: steps:verify_current_task
+  next: repair
+- id: record_unresolved
+  action: steps:record_repeated_proposal
+  router: steps:queue_route
+  routes:
+    continue: repair
+    finished: save
 - id: save
   action: steps:save_gds
   next: END

@@ -19,7 +19,10 @@
     }
   ],
   "properties": {
-    "request_builder": {"type": "string", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z_][a-zA-Z0-9_]*$"},
+    "request_builder": {
+      "type": "string",
+      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z_][a-zA-Z0-9_]*$"
+    },
     "task": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*$"
@@ -55,8 +58,7 @@
         "additionalProperties": false,
         "required": [
           "id",
-          "action",
-          "next"
+          "action"
         ],
         "properties": {
           "id": {
@@ -98,8 +100,50 @@
             "items": {
               "type": "string"
             }
+          },
+          "router": {
+            "type": "string"
+          },
+          "routes": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "string"
+            }
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "next"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "routes"
+                  ]
+                },
+                {
+                  "required": [
+                    "router"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "router",
+              "routes"
+            ],
+            "not": {
+              "required": [
+                "next"
+              ]
+            }
+          }
+        ]
       }
     },
     "steps": {
@@ -110,8 +154,7 @@
         "additionalProperties": false,
         "required": [
           "id",
-          "action",
-          "next"
+          "action"
         ],
         "properties": {
           "id": {
@@ -153,8 +196,50 @@
             "items": {
               "type": "string"
             }
+          },
+          "router": {
+            "type": "string"
+          },
+          "routes": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "string"
+            }
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "next"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "routes"
+                  ]
+                },
+                {
+                  "required": [
+                    "router"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "required": [
+              "router",
+              "routes"
+            ],
+            "not": {
+              "required": [
+                "next"
+              ]
+            }
+          }
+        ]
       }
     },
     "protocol": {
@@ -185,6 +270,9 @@
     },
     "knowledge_review": {
       "type": "boolean"
+    },
+    "entry": {
+      "type": "string"
     }
   },
   "additionalProperties": false

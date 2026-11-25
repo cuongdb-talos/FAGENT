@@ -79,6 +79,8 @@ class WorkflowLoader:
         ids = {step['id'] for step in steps}
         if len(ids) != len(steps):
             raise ValueError('Duplicate step IDs')
+        if data.get('entry', steps[0]['id']) not in ids:
+            raise ValueError('Unknown workflow entry')
         references = {}
         prepare_reference = data.get('prepare')
         builder_reference = data.get("request_builder")
@@ -92,8 +94,10 @@ class WorkflowLoader:
         for step in entries:
             action = step['action']
             identifier = step['id']
-            if step['next'] not in ids | {'END'}:
-                raise ValueError(f'{identifier}: unknown route {step["next"]}')
+            destinations = step['routes'].values() if 'routes' in step else (step['next'],)
+            for destination in destinations:
+                if destination not in ids | {'END'}:
+                    raise ValueError(f'{identifier}: unknown route {destination}')
             if action == 'review' and step.get('continue') not in ids:
                 raise ValueError(f'{identifier}: invalid continue route {step.get("continue")}')
             if action != 'review' and 'continue' in step:
@@ -105,6 +109,8 @@ class WorkflowLoader:
                 bindings = list(action)
             elif action not in {'agent', 'plan', 'review'}:
                 bindings = [action]
+            if 'router' in step:
+                bindings = [*bindings, step['router']]
             for reference in bindings:
                 match = re.fullmatch(r'([a-zA-Z_][a-zA-Z0-9_]*):([a-zA-Z_][a-zA-Z0-9_]*)', reference)
                 if not match:
@@ -198,8 +204,14 @@ class WorkflowLoader:
                     except (ValueError, TypeError, SchemaError) as exc:
                         raise ValueError(f'{reference}: {exc}') from exc
                     tools[name] = metadata
+                router = None
+                if 'router' in step:
+                    router = self._bind(directory, step['router'], references, sources, modules)
+                    self._check_signature(router)
                 resolved.append(SimpleNamespace(**{
                     **step,
+                    'router': router,
+                    'next': step.get('next', 'END'),
                     'continue_to': step.get('continue'),
                     'function': function,
                     'functions': functions,

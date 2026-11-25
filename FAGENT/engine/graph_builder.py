@@ -30,10 +30,11 @@ class GraphBuilder:
         for step in steps:
             node = nodes.node_name(step.id)
             graph.add_node(node, partial(nodes.run_task_step, step=step))
-            routes = [END]
+            configured_routes = [nodes.node_name(target) for target in getattr(step, 'routes', {}).values()]
+            routes = [END, *configured_routes]
             if step.next != 'END':
                 routes.append(nodes.node_name(step.next))
-            if any(getattr(s, 'id', None) == 'save' for s in steps) and step.id != 'save':
+            if not configured_routes and any(getattr(s, 'id', None) == 'save' for s in steps) and step.id != 'save':
                 routes.append(nodes.node_name('save'))
             if step.action == 'review':
                 routes.extend((node, nodes.node_name(step.continue_to)))
@@ -41,7 +42,7 @@ class GraphBuilder:
                 tool_node = f'{step.id}--tools'
                 routes.extend((node, tool_node))
                 graph.add_node(tool_node, partial(nodes.run_task_step, step=step, tools=True))
-                tool_routes = [END, node]
+                tool_routes = [END, node, *configured_routes]
                 if step.next != 'END':
                     tool_routes.append(nodes.node_name(step.next))
                 review_node = f'{step.id}--tool-review'
@@ -56,7 +57,7 @@ class GraphBuilder:
                     tool_routes.append(nodes.node_name('plan'))
                 graph.add_conditional_edges(tool_node, partial(nodes.route_task_tools, step=step), list(dict.fromkeys(tool_routes)))
             graph.add_conditional_edges(node, partial(nodes.route_task_step, step=step), list(dict.fromkeys(routes)))
-        graph.add_edge(START, nodes.node_name(steps[0].id))
+        graph.add_edge(START, nodes.node_name(getattr(self.services.workflow, 'entry', steps[0].id)))
         self.graph = graph.compile(checkpointer=self.checkpointer)
         return self.graph
 

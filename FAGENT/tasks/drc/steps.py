@@ -117,10 +117,18 @@ class Steps:
         gds_payload = context.services.layout.read_gds(cell_name=target_cell)
         drc_context['gds'] = gds_payload
         drc_context['target_cell'] = target_cell
-        drc_context['candidate_path'] = context.state.get('candidate_path')
-        drc_context['candidate_digest'] = context.state.get('candidate_digest')
+        candidate_path = context.state.get('candidate_path')
+        candidate_digest = context.state.get('candidate_digest')
+        if not candidate_path:
+            candidate_path = str(context.services.checkpoint_candidate())
+            candidate_digest = context.services.candidate_digest(Path(candidate_path))
+            if not candidate_digest:
+                raise ValueError('Missing candidate digest after initial GDS checkpoint')
+        drc_context['candidate_path'] = candidate_path
+        drc_context['candidate_digest'] = candidate_digest
         inspected = list(dict.fromkeys([*(context.state.get('inspected') or []), target_cell]))
-        return {'drc_context': drc_context, 'inspected': inspected}
+        return {'drc_context': drc_context, 'inspected': inspected,
+                'candidate_path': candidate_path, 'candidate_digest': candidate_digest}
 
     def save_gds(self, context):
         """Save final candidate GDS once after queue completion, preserving original GDS on error."""
@@ -232,3 +240,71 @@ read_gds = _steps.read_gds
 save_gds = _steps.save_gds
 validate_drc = _steps.validate_drc
 prepare = _steps.prepare
+
+
+def repair_route(context):
+    state = context.state
+    task_id = state.get('current_task_id')
+    if task_id is None:
+        return 'finished'
+    transaction = (state.get('task_transactions') or {}).get(task_id)
+    check = (state.get('task_checks') or {}).get(task_id) or {}
+    if transaction and (check.get('status'), check.get('candidate_digest')) != (
+        'pass', state.get('candidate_digest'),
+    ):
+        return 'verify'
+
+    messages = state.get('messages', [])[state.get('task_message_start', 0):]
+    if messages and messages[-1].get('role') == 'tool':
+        results = {
+            message['tool_call_id']: json.loads(message['content'])
+            for message in messages if message.get('role') == 'tool'
+        }
+        seen = set()
+        for message in messages:
+            for call in message.get('tool_calls') or ():
+                function = call['function']
+                args = function['arguments']
+                if isinstance(args, str):
+                    args = json.loads(args)
+                result = results.get(call['id'], {})
+                if args.get('action') == 'propose' and not result.get('proposals'):
+                    key = function['name'], json.dumps(args, sort_keys=True)
+                    if key in seen:
+                        return 'repeated'
+                    seen.add(key)
+    return 'continue'
+
+
+def verify_current_task(context):
+    task_id = context.state['current_task_id']
+    transaction = context.state['task_transactions'][task_id]
+    check = {'area': DrcTools.check_area, 'cover': DrcTools.check_cover}[transaction['kind']]
+    result = check(context, task_id)
+    updates = dict(result.updates)
+    if result.payload.get('status') != 'pass' and not result.payload.get('rolled_back'):
+        return {
+            'failed': True,
+            'result': {'status': 'incomplete', 'reason': result.payload.get('reason', 'Local check unavailable')},
+        }
+    if 'candidate_digest' in updates:
+        gds_context = dict(context.state.get('drc_context') or {})
+        gds_context.update(
+            gds=context.services.layout.read_gds(cell_name=transaction['cell_name']),
+            candidate_path=updates['candidate_path'],
+            candidate_digest=updates['candidate_digest'],
+        )
+        updates['drc_context'] = gds_context
+    return updates
+
+
+def record_repeated_proposal(context):
+    from FAGENT.engine.graph_nodes import GraphNodes
+
+    return GraphNodes(context.services).advance_queue_item(
+        context.state, 'unresolved', 'Repeated proposal call without a geometry change',
+    )
+
+
+def queue_route(context):
+    return 'finished' if context.state.get('current_task_id') is None else 'continue'

@@ -56,10 +56,14 @@ class StructuredChatContract:
             function = tool['function']
             parameters = deepcopy(function['parameters'])
             parameters['additionalProperties'] = False
-            alternatives.append({'type': 'object', 'properties': {
+            alternative = {'type': 'object', 'properties': {
                 'name': {'const': function['name']}, 'arguments': parameters},
-                'required': ['name', 'arguments'], 'additionalProperties': False})
-        alternatives.append(response_schema)
+                'required': ['name', 'arguments'], 'additionalProperties': False}
+            if function.get('description'):
+                alternative['description'] = function['description']
+            alternatives.append(alternative)
+        if response_schema is not False:
+            alternatives.append(response_schema)
         self.schema = {'oneOf': alternatives}
         return self.schema
 
