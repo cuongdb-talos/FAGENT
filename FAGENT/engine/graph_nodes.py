@@ -593,6 +593,8 @@ class GraphNodes:
             agent_payload['goal'] = goal
         if state.get('current_task_id') is not None:
             agent_payload['current_task_id'] = state['current_task_id']
+            agent_payload['active_task'] = self.build_active_task_context(state, state['current_task_id'])
+            agent_payload['task_history'] = list(state.get('task_history') or [])
         if state.get('plan') is not None:
             agent_payload['plan'] = state['plan']
         active_plan = self.active_plan(state.get('plan_history', []))
@@ -663,6 +665,64 @@ class GraphNodes:
         read_gds['function']['parameters']['properties']['cell_name']['enum'] = names
         specs['read_gds'] = read_gds
         return list(specs.values())
+
+    def build_active_task_context(self, state, task_id: str) -> dict:
+        """Build per-marker context with DBU-converted coordinates and current candidate GDS."""
+        checklist = state.get('checklist') or {}
+        task = next((t for t in checklist.get('tasks', []) if t.get('task_id') == task_id), {})
+        report = state.get('report') or {}
+        marker = None
+        if task:
+            rule_name = task.get('rule')
+            vid = task.get('violation_id')
+            occ = task.get('occurrence', 0)
+            for rule in report.get('rules') or []:
+                if rule.get('name') != rule_name:
+                    continue
+                seen = 0
+                for geom in rule.get('geometry') or []:
+                    if geom.get('id') == vid:
+                        if seen == occ:
+                            marker = geom
+                            break
+                        seen += 1
+                if marker is not None:
+                    break
+        scale = report.get('dbu_per_user_unit')
+        points_dbu = marker.get('points_dbu') if isinstance(marker, dict) else None
+        points_user = None
+        if isinstance(points_dbu, list) and isinstance(scale, (int, float)) and scale > 0:
+            points_user = [[pt[0] / scale, pt[1] / scale] for pt in points_dbu]
+        drc_context = state.get('drc_context') or {}
+        return {
+            'task_id': task_id,
+            'rule': task.get('rule'),
+            'violation_id': task.get('violation_id'),
+            'occurrence': task.get('occurrence', 0),
+            'status': task.get('status'),
+            'dbu_per_user_unit': scale,
+            'marker': marker,
+            'points_user': points_user,
+            'gds': drc_context.get('gds'),
+            'candidate_path': state.get('candidate_path'),
+            'candidate_digest': state.get('candidate_digest'),
+        }
+
+    def refresh_candidate_context(self, context, updates: dict) -> None:
+        """Refresh live cell geometry in drc_context when a tool produces a new candidate digest."""
+        new_digest = updates.get('candidate_digest')
+        if not new_digest or new_digest == context.state.get('candidate_digest'):
+            return
+        drc_context = dict(updates.get('drc_context') or context.state.get('drc_context') or {})
+        report = context.state.get('report') or {}
+        target_cell = drc_context.get('target_cell') or report.get('top_cell') or context.inputs.get('cell')
+        layout = getattr(context.services, 'layout', None)
+        if target_cell and layout is not None and hasattr(layout, 'read_gds'):
+            drc_context['gds'] = layout.read_gds(cell_name=target_cell)
+            drc_context['target_cell'] = target_cell
+        drc_context['candidate_path'] = updates.get('candidate_path', context.state.get('candidate_path'))
+        drc_context['candidate_digest'] = new_digest
+        updates['drc_context'] = drc_context
 
     def execute_tools(self, context, step):
         """Validate calls before dispatch and correlate each response."""
@@ -789,6 +849,7 @@ class GraphNodes:
                 reason = f'{context.task}/{step.id}: cannot write checklist.json: {exc}'
                 print(f'[ERROR] {reason}', file=sys.stderr)
                 updates.update(failed=True, result={'status': 'incomplete', 'reason': reason})
+        self.refresh_candidate_context(context, updates)
         return {**updates, 'messages': messages, 'pending_tools': False}
 
     def save_conversation(self, messages):

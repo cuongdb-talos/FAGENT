@@ -13,29 +13,31 @@ inputs:
 backend: local
 nodes:
 - id: read
-  action: steps:read_drc
-  next: plan
-- id: plan
-  action: plan
-  prompt: prompts/plan.md
-  schema: schemas/plan.json
+  action: 
+    - steps:read_drc
+    - steps:read_gds
   next: repair
+# - id: plan
+#   action: plan
+#   prompt: prompts/plan.md
+#   schema: schemas/plan.json
+#   next: repair
 - id: repair
   action: agent
   next: END
   tools:
-  - tools:read_gds
   - tools:replace_polygon
   - tools:check_cover
-  - tools:read_checklist
+  # - tools:read_checklist
   - tools:update_checklist
-  - tools:get_violation
-  - tools:find_rule
-  - tools:find_related_polygons
-  - tools:measure_violation
-  - tools:propose_polygon_fix
-  - tools:apply_polygon_fix
-  - tools:recheck_violation
+  # - tools:get_violation
+  # - tools:find_rule
+  # - tools:find_related_polygons
+  # - tools:measure_violation
+  # - tools:propose_polygon_fix
+  # - tools:apply_polygon_fix
+  # - tools:recheck_violation
+  # - tools:skip_plan_step
 # - id: validate
 #   action: steps:validate_drc
 #   next: human_review
