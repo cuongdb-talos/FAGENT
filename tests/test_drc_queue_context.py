@@ -24,6 +24,14 @@ class FakeMutableLayout:
         self.polygons = [dict(p) for p in polygons]
         self.read_calls = []
         self.edit_count = 0
+        self.polygon_ids = SimpleNamespace(id_for=lambda _c, poly: poly._pid)
+
+    def get_cell(self, cell_name: str):
+        poly_objs = [
+            SimpleNamespace(layer=p.get('layer', 1), datatype=p.get('datatype', 0), points=p['points'], _pid=p['id'])
+            for p in self.polygons
+        ]
+        return SimpleNamespace(name=cell_name, polygons=poly_objs, references=[], paths=[])
 
     def read_gds(self, cell_name: str):
         self.read_calls.append(cell_name)
@@ -256,21 +264,21 @@ def test_task_attributed_history_and_candidate_refresh_across_two_tasks(tmp_path
     assert len(observed_payloads) == 3
     # First request (task-1): DBU-to-user-unit conversion and initial geometry
     req1 = observed_payloads[0]
-    assert req1['active_task']['task_id'] == 'task-1'
-    assert req1['active_task']['dbu_per_user_unit'] == 1000
-    assert req1['active_task']['points_user'] == [[0.065, 0.07], [0.118, 0.07], [0.118, 0.16], [0.065, 0.16]]
+    assert req1['active_task']['task']['task_id'] == 'task-1'
+    assert req1['active_task']['drc']['dbu_per_user_unit'] == 1000
+    assert req1['active_task']['drc']['marker_user'] == [[0.065, 0.07], [0.118, 0.07], [0.118, 0.16], [0.065, 0.16]]
     assert req1['task_history'] == []
 
     # Second request (still task-1, right after edit): refreshed geometry and candidate digest
     req2 = observed_payloads[1]
-    assert req2['active_task']['candidate_digest'] == 'sha-after-task-1'
-    assert req2['active_task']['gds']['polygons'][0]['points'] == [[0.0, 0.0], [0.25, 0.0], [0.25, 0.1], [0.0, 0.1]]
+    assert req2['active_task']['layout']['candidate_digest'] == 'sha-after-task-1'
+    assert req2['active_task']['layout']['polygons'][0]['points'] == [[0.0, 0.0], [0.25, 0.0], [0.25, 0.1], [0.0, 0.1]]
 
-    # Third request (task-2): sees task-1 in task_history and task-1's updated geometry
+    # Third request (task-2): sees task-1 in task_history and task-1's updated candidate digest
     req3 = observed_payloads[2]
-    assert req3['active_task']['task_id'] == 'task-2'
-    assert req3['active_task']['points_user'] == [[-0.09, 0.21], [0.31, 0.21], [0.31, 0.27], [-0.09, 0.27]]
-    assert req3['active_task']['gds']['polygons'][0]['points'] == [[0.0, 0.0], [0.25, 0.0], [0.25, 0.1], [0.0, 0.1]]
+    assert req3['active_task']['task']['task_id'] == 'task-2'
+    assert req3['active_task']['drc']['marker_user'] == [[-0.09, 0.21], [0.31, 0.21], [0.31, 0.27], [-0.09, 0.27]]
+    assert req3['active_task']['layout']['candidate_digest'] == 'sha-after-task-1'
     assert req3['task_history'] == [
         {'sequence': 1, 'task_id': 'task-1', 'status': 'pass', 'reason': 'Fixed task-1'}
     ]
@@ -326,4 +334,4 @@ def test_unchanged_or_failed_edit_does_not_falsely_refresh_candidate(tmp_path: P
 
     # Only the initial read_gds happened; unchanged edit did not re-read layout
     assert layout.read_calls == ['CELL_A']
-    assert observed_payloads[1]['active_task']['candidate_digest'] is None
+    assert observed_payloads[1]['active_task']['layout']['candidate_digest'] is None
