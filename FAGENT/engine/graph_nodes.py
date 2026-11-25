@@ -587,10 +587,10 @@ class GraphNodes:
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
         messages = list(state.get('messages', []))
         node_prompt = self.services.node_prompt(step)
-        request_messages, _agent_payload = self.build_model_request(state, node_prompt=node_prompt, step_id=step.id, task_name=context.task)
         report = state.get('report') or {}
         target_cell = report.get('top_cell') if context.task == 'drc' else None
         try:
+            request_messages, _agent_payload = self.build_model_request(state, node_prompt=node_prompt, step_id=step.id, task_name=context.task)
             message = self.services.chat(
                 request_messages,
                 self.agent_tool_specs(step, context.task, target_cell),
@@ -663,6 +663,23 @@ class GraphNodes:
         """Build model-facing messages and compact payload without mutating stored state history."""
         messages = list(state.get('messages') or [])
         queue_mode = state.get('task_queue') is not None and state.get('current_task_id') is not None
+
+        builder = getattr(getattr(self.services, 'workflow', None), 'request_builder', None)
+        if builder is not None:
+            focused = None
+            if task_name == 'drc' and state.get('current_task_id') is not None:
+                focused = self.build_active_task_context(state, state['current_task_id'])
+            request = builder(state, node_prompt, self.services, focused)
+            if not isinstance(request, dict) or set(request) != {'system', 'user'}:
+                raise ValueError('Request builder must return system and user fields')
+            if not isinstance(request['system'], str) or not isinstance(request['user'], dict):
+                raise ValueError('Request builder must return system text and a user object')
+            history = self._select_task_messages(messages, state.get('task_message_start', 0))
+            return [
+                {'role': 'system', 'content': request['system']},
+                {'role': 'user', 'content': json.dumps(request['user'], allow_nan=False)},
+                *(message for message in history if message.get('role') in ('assistant', 'tool')),
+            ], request['user']
 
         agent_payload = {}
         if node_prompt:

@@ -35,11 +35,10 @@ class ScriptedChatClient:
         if last_msg['role'] == 'user':
             payload = json.loads(last_msg['content'])
             self.payloads.append(payload)
-            active = payload.get('active_task') or {}
-            tid = (active.get('task') or {}).get('task_id')
+            tid = payload['task_id']
             if tid == 'task-1' and not self.edited_task1:
                 self.edited_task1 = True
-                layout_ctx = active.get('layout') or {}
+                layout_ctx = payload['layout']
                 poly_id = layout_ctx['polygons'][0]['id']
                 return {
                     'role': 'assistant',
@@ -50,7 +49,7 @@ class ScriptedChatClient:
                         'function': {
                             'name': 'replace_polygon',
                             'arguments': json.dumps({
-                                'cell_name': layout_ctx['cell'],
+                                'cell_name': payload['cell'],
                                 'polygon_id': poly_id,
                                 'points': [[0.0, 0.0], [0.3, 0.0], [0.3, 0.1], [0.0, 0.1]],
                             }),
@@ -58,7 +57,7 @@ class ScriptedChatClient:
                     }],
                 }
             if tid == 'task-2':
-                layout_ctx = active.get('layout') or {}
+                layout_ctx = payload['layout']
                 return {
                     'role': 'assistant',
                     'content': None,
@@ -68,7 +67,7 @@ class ScriptedChatClient:
                         'function': {
                             'name': 'replace_polygon',
                             'arguments': json.dumps({
-                                'cell_name': layout_ctx['cell'],
+                                'cell_name': payload['cell'],
                                 'polygon_id': 'NONEXISTENT:poly:999',
                                 'points': [[0.0, 0.0], [0.1, 0.0], [0.1, 0.1], [0.0, 0.1]],
                             }),
@@ -117,7 +116,7 @@ def create_sample_inputs(tmp_path: Path, cell_name: str = 'TEST_CELL') -> tuple[
     drc_path.write_text(drc_text, encoding='utf-8')
 
     layermap_path = tmp_path / 'test.layermap'
-    layermap_path.write_text('M1 drawing 61 0\n', encoding='utf-8')
+    layermap_path.write_text('61 0 M1 drawing\n', encoding='utf-8')
 
     deck_path = tmp_path / 'rules.drc'
     deck_path.write_text('CT_EN {\n  @ M1 enclosure of CT >= 0.025um\n}\n', encoding='utf-8')
@@ -203,12 +202,11 @@ def test_drc_marker_queue_end_to_end_and_artifacts(tmp_path: Path, monkeypatch) 
 
     # 6. Task-2 received task-1's updated geometry, candidate digest, and task_history
     assert all('current_checklist' not in p and 'report' not in p for p in scripted.payloads)
-    assert len(scripted.payloads[0]['active_task']['layout']['polygons']) == 2
-    task2_payload = next(p for p in scripted.payloads if (p.get('active_task') or {}).get('task', {}).get('task_id') == 'task-2')
-    assert task2_payload['task_history'][0]['task_id'] == 'task-1'
-    assert task2_payload['task_history'][0]['status'] == 'pass'
-    assert task2_payload['active_task']['layout']['candidate_digest'] == result['candidate_digest']
-    assert any(max(pt[0] for pt in p['points']) == 0.3 for p in task2_payload['active_task']['layout']['polygons'])
+    assert len(scripted.payloads[0]['layout']['polygons']) == 2
+    task2_payload = next(p for p in scripted.payloads if p['task_id'] == 'task-2')
+    assert task2_payload['task_history'] == []
+    assert task2_payload['layout']['candidate_digest'] == result['candidate_digest']
+    assert any(max(pt[0] for pt in p['points']) == 0.3 for p in task2_payload['layout']['polygons'])
 
 
 def test_checkpoint_resume_binds_live_candidate_digest_and_geometry(tmp_path: Path, monkeypatch) -> None:
@@ -292,4 +290,4 @@ def test_failed_candidate_write_rolls_back_and_never_exposes_stale_digest(tmp_pa
     assert not (rundir / 'candidate.gds').exists()
     # Second request for task-1 (after failed write) and task-2 must never see a non-None stale digest
     for payload in scripted.payloads[1:]:
-        assert payload['active_task']['layout']['candidate_digest'] is None
+        assert payload['layout']['candidate_digest'] is None

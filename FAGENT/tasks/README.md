@@ -112,3 +112,16 @@ sau mỗi phản hồi model và kết quả tool.
    - **Request ID:** Các yêu cầu model được gán `request_id` tăng dần đơn điệu (`"1"`, `"2"`, ...) duy nhất trong phạm vi run, được bảo toàn liên tục kể cả khi resume checkpoint.
    - **Ghi trực tiếp và liên tục (Live Persistence):** File `conversation.json` được ghi nguyên tử (atomic write qua file tạm) trước và ngay sau mỗi lần gọi model cũng như sau mỗi kết quả tool, giúp phục hồi và chẩn đoán lỗi kể cả khi tiến trình bị ngắt đột ngột. Runner ở bước `finish` tuyệt đối không ghi đè trace bằng mảng state `messages`.
    - **Giới hạn lượt chạy lịch sử (Historical Run Limitation):** Các lượt chạy trước đây chỉ lưu mảng tin nhắn kết thúc, không ghi lại các yêu cầu tạm thời (ephemeral requests), do đó không thể tái cấu trúc chính xác các yêu cầu model ban đầu từ dữ liệu lịch sử.
+
+## Payload riêng cho agent
+
+Khai báo `request_builder: model_payload:build_request` ở cấp workflow để
+tạo request riêng mà giữ nguyên các node và route. Hàm task-local nhận
+`(state, node_prompt, services, focused)` và trả về
+`{'system': '...', 'user': {...}}`. `focused` là context marker sẵn có
+cho DRC và có giá trị `None` cho task khác. Builder chọn trường gửi đi
+và thể hiện dữ liệu thiếu bằng `null` hoặc lý do cụ thể.
+
+Engine mã hóa user payload thành chuỗi JSON và nối các cặp assistant/tool
+của mục đang xử lý sau hai message đầu. Tool, schema phản hồi và trace vẫn
+do engine quản lý. Workflow chưa khai báo builder dùng request hiện tại.

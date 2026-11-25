@@ -81,7 +81,10 @@ class WorkflowLoader:
             raise ValueError('Duplicate step IDs')
         references = {}
         prepare_reference = data.get('prepare')
+        builder_reference = data.get("request_builder")
         entries = list(steps)
+        if builder_reference:
+            entries.append({"id": "request_builder", "action": builder_reference, "next": "END"})
         if prepare_reference:
             if prepare_reference in {'agent', 'review'}:
                 raise ValueError('Prepare must reference a task callable')
@@ -138,6 +141,13 @@ class WorkflowLoader:
                 raise ValueError('Review requires both prompt and schema when configured')
         feedback_schema = self._parse_object_schema(shared['review_schema'], 'A review object schema is required') if 'review_schema' in shared else None
         modules = {}
+        request_builder = None
+        if builder_reference:
+            try:
+                request_builder = self._bind(directory, builder_reference, references, sources, modules)
+                inspect.signature(request_builder).bind(*[object()] * 4)
+            except (ValueError, TypeError, ImportError, SyntaxError) as exc:
+                raise ValueError(f"request_builder: {builder_reference}: {exc}") from exc
         prepare = None
         if prepare_reference:
             try:
@@ -205,7 +215,7 @@ class WorkflowLoader:
         return SimpleNamespace(**{
             **data, 'nodes': tuple(resolved), 'steps': tuple(resolved), 'prompt_text': prompts,
             'response_schema': response_schema, 'digest': digest.hexdigest(),
-            'prepare': prepare, 'protocol_text': shared.get('protocol', ''),
+            'request_builder': request_builder, 'prepare': prepare, 'protocol_text': shared.get('protocol', ''),
             'review_text': shared.get('review_prompt'),
             'feedback_schema': feedback_schema, 'mock_pass': data.get('mock_pass', False),
             'reference_label': 'Retrieved reference data',

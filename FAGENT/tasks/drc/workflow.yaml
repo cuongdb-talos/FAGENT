@@ -1,5 +1,6 @@
 task: drc
 version: 1
+request_builder: model_payload:build_request
 prompts:
 - prompts/repair.md
 protocol: knowledge/templates/prompts/protocol.md
