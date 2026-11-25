@@ -26,6 +26,7 @@ nodes:
   action: agent
   next: END
   tools:
+  - tools:query_layout_region
   - tools:replace_polygon
   - tools:check_cover
   # - tools:read_checklist

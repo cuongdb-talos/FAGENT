@@ -40,17 +40,16 @@ class DrcTools:
             if not digest:
                 raise ValueError("Missing candidate digest")
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            if hasattr(layout, "rollback_last_replace"):
+                layout.rollback_last_replace()
             return ToolResult({"error": type(exc).__name__}, {"candidate_path": None, "candidate_digest": None, "validation": None})
         updates = {"candidate_path": str(candidate), "candidate_digest": digest, "validation": None}
         if context.state.get("checklist"):
             checklist = Checklist.from_dict(context.state["checklist"])
             checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
-            checklist_path = Path(context.services.rundir) / "checklist.json"
-            context.services.check_output_path(checklist_path)
-            checklist.save(checklist_path)
             updates["checklist"] = checklist_snapshot
             updates["checklist_digest"] = checklist_snapshot["digest"]
-            updates["checklist_path"] = str(checklist_path)
+            updates["checklist_path"] = None
         return ToolResult(result, updates)
 
     def check_cover(context, cell_name, inner_id, outer_id, minimum):
@@ -74,227 +73,29 @@ class DrcTools:
         payload = {"cell": cell_name, "inner_id": inner_id, "outer_id": outer_id, **result}
         return ToolResult(payload, {})
 
-    def find_rule(context, task_id):
-        """Retrieve original rule text, source locations, and physical layer maps."""
-        raw = context.state.get("checklist")
-        if not raw:
-            raise ValueError("Checklist has not been initialized for this run")
-        checklist = Checklist.from_dict(raw)
-        task = next((t for t in checklist.tasks if t.get("task_id") == task_id), None)
-        if task is None:
-            raise ValueError(f"Unknown checklist task_id: {task_id}")
+    def _resolve_rule_inputs(context):
+        """Resolve DRC deck paths and physical layer map files from services, layout, or config."""
+        services = context.services
+        cfg = getattr(services, "config", {}) or {}
+        input_sources = getattr(services, "input_sources", None) or {}
+        layout = getattr(services, "layout", None)
+        gds_data = getattr(layout, "gds_data", None) or {}
 
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
+        deck_paths = (
+            getattr(services, "drc_files", None)
+            or input_sources.get("decks")
+            or getattr(layout, "drc_files", None)
+            or cfg.get("drc_files", [])
+        )
+        layer_maps = (
+            getattr(services, "layer_maps", None)
+            or input_sources.get("layer_maps")
+            or gds_data.get("layer_maps")
+            or cfg.get("layer_maps", [])
+            or cfg.get("layer_map_files", [])
+        )
         references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
-
-        if not deck_paths:
-            evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        return ToolResult(evidence, {})
-
-    def find_related_polygons(context, task_id, search_margin_dbu=0):
-        """Resolve DRC marker to candidate layout polygons with candidate digest binding."""
-        v_result = DrcTools.get_violation(context, task_id)
-        task = v_result.payload.get("task") or {}
-        task["violation"] = v_result.payload.get("violation")
-        task["owning_cell"] = v_result.payload.get("owning_cell")
-
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
-
-        if not deck_paths:
-            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        geom_result = ViolationGeometry().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-            search_margin_dbu=search_margin_dbu,
-        )
-        return ToolResult(geom_result, {})
-
-    def measure_violation(context, task_id, polygon_ids=None):
-        """Measure geometric enclosure or distance for a specific violation task."""
-        v_result = DrcTools.get_violation(context, task_id)
-        task = v_result.payload.get("task") or {}
-        task["violation"] = v_result.payload.get("violation")
-        task["owning_cell"] = v_result.payload.get("owning_cell")
-
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
-
-        if not deck_paths:
-            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        geom_result = ViolationGeometry().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        proposals_result = RepairProposals().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            geometry=geom_result,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        return ToolResult(proposals_result["measurement"], {})
-
-    def propose_polygon_fix(context, task_id, polygon_ids=None):
-        """Generate deterministic repair proposals for a measured violation."""
-        v_result = DrcTools.get_violation(context, task_id)
-        task = v_result.payload.get("task") or {}
-        task["violation"] = v_result.payload.get("violation")
-        task["owning_cell"] = v_result.payload.get("owning_cell")
-
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
-
-        if not deck_paths:
-            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        geom_result = ViolationGeometry().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        proposals_result = RepairProposals().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            geometry=geom_result,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        proposals_list = proposals_result["proposals"]
-        proposals_map = {p["repair_id"]: p for p in proposals_list}
-        existing = dict(context.state.get("proposals") or {})
-        existing.update(proposals_map)
-        updates = {"proposals": existing}
-        return ToolResult({"task_id": task_id, "proposals": proposals_list}, updates)
-
-    def apply_polygon_fix(context, repair_id):
-        """Apply a staged repair proposal to the candidate layout transactionally."""
-        proposals = context.state.get("proposals") or {}
-        proposal = proposals.get(repair_id)
-        if not proposal:
-            raise ValueError(f"Unknown repair_id: {repair_id}")
-
-        expected_digest = proposal.get("candidate_digest")
-        current_digest = context.state.get("candidate_digest")
-        if expected_digest != current_digest:
-            raise ValueError(f"Stale repair proposal {repair_id}: candidate layout has changed (expected {expected_digest}, current {current_digest})")
-
-        assumptions = proposal.get("rule_assumptions", "")
-        if not assumptions:
-            raise ValueError("Proposal lacking verified rule assumptions cannot be applied")
-
-        cell_name = proposal["cell"]
-        polygon_id = proposal["target_polygon_id"]
-        points = proposal["after_points_user"]
-
-        layout = context.services.layout
-        result = layout.replace_polygon(cell_name=cell_name, polygon_id=polygon_id, points=points)
-        if result.get("status") != "modified":
-            return ToolResult(result, {})
-
-        try:
-            candidate = context.services.checkpoint_candidate()
-            digest = GraphServices.candidate_digest(Path(candidate))
-            if not digest:
-                raise ValueError("Missing candidate digest after checkpoint")
-        except Exception:
-            if "old_polygon" in result and "new_polygon" in result and hasattr(layout, "rollback_replace"):
-                layout.rollback_replace(cell_name, polygon_id, result["old_polygon"], result["new_polygon"])
-            raise
-
-        updates = {
-            "candidate_path": str(candidate),
-            "candidate_digest": digest,
-            "validation": None,
-            "proposals": {},
-        }
-        if context.state.get("checklist"):
-            checklist = Checklist.from_dict(context.state["checklist"])
-            checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
-            checklist_path = Path(context.services.rundir) / "checklist.json"
-            if hasattr(context.services, "check_output_path"):
-                context.services.check_output_path(checklist_path)
-            checklist.save(checklist_path)
-            updates["checklist"] = checklist_snapshot
-            updates["checklist_digest"] = checklist_snapshot["digest"]
-            updates["checklist_path"] = str(checklist_path)
-
-        payload = {
-            "status": "applied",
-            "repair_id": repair_id,
-            "cell": cell_name,
-            "polygon_id": polygon_id,
-            "candidate_digest": digest,
-        }
-        return ToolResult(payload, updates)
-
-    def recheck_violation(context, task_id):
-        """Evaluate supported local geometry on the saved candidate layout."""
-        meas_res = DrcTools.measure_violation(context, task_id)
-        meas = meas_res.payload
-        status = meas.get("status")
-        candidate_digest = context.state.get("candidate_digest")
-
-        updates = {}
-        if status == "pass":
-            local_verified = True
-            raw = context.state.get("checklist")
-            if raw:
-                checklist = Checklist.from_dict(raw)
-                evidence_rec = {
-                    "type": "local_geometry_recheck",
-                    "status": "pass",
-                    "candidate_digest": candidate_digest,
-                    "measurement": meas,
-                }
-                snapshot = checklist.update(
-                    task_id=task_id,
-                    status="pass",
-                    reason="Locally verified geometry pass on candidate layout (local geometry only, not full DRC deck clean)",
-                    evidence=[evidence_rec],
-                )
-                checklist_path = Path(context.services.rundir) / "checklist.json"
-                if hasattr(context.services, "check_output_path"):
-                    context.services.check_output_path(checklist_path)
-                checklist.save(checklist_path)
-                updates = {
-                    "checklist": snapshot,
-                    "checklist_digest": snapshot["digest"],
-                    "checklist_path": str(checklist_path),
-                }
-        else:
-            local_verified = False
-
-        payload = {
-            "status": status,
-            "task_id": task_id,
-            "local_verified": local_verified,
-            "deck_clean": False,
-            "notice": "Local geometry recheck only; not a deck-level DRC pass.",
-            "measurement": meas,
-            "candidate_digest": candidate_digest,
-        }
-        return ToolResult(payload, updates)
+        return deck_paths, layer_maps, references
 
     def read_checklist(context):
         """Return the current run-scoped violation checklist."""
@@ -364,10 +165,7 @@ class DrcTools:
         if task is None:
             raise ValueError(f"Unknown checklist task_id: {task_id}")
 
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
 
         if not deck_paths:
             evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
@@ -382,10 +180,7 @@ class DrcTools:
         task["violation"] = v_result.payload.get("violation")
         task["owning_cell"] = v_result.payload.get("owning_cell")
 
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
 
         if not deck_paths:
             rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
@@ -407,10 +202,7 @@ class DrcTools:
         task["violation"] = v_result.payload.get("violation")
         task["owning_cell"] = v_result.payload.get("owning_cell")
 
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
 
         if not deck_paths:
             rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
@@ -438,10 +230,7 @@ class DrcTools:
         task["violation"] = v_result.payload.get("violation")
         task["owning_cell"] = v_result.payload.get("owning_cell")
 
-        cfg = getattr(context.services, "config", {}) or {}
-        deck_paths = getattr(context.services, "drc_files", None) or cfg.get("drc_files", [])
-        layer_maps = getattr(context.services, "layer_maps", None) or cfg.get("layer_maps", []) or cfg.get("layer_map_files", [])
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
+        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
 
         if not deck_paths:
             rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
@@ -465,7 +254,11 @@ class DrcTools:
         existing = dict(context.state.get("proposals") or {})
         existing.update(proposals_map)
         updates = {"proposals": existing}
-        return ToolResult({"task_id": task_id, "proposals": proposals_list}, updates)
+        payload = {"task_id": task_id, "proposals": proposals_list}
+        reason = proposals_result.get("reason") or proposals_result.get("measurement", {}).get("reason", "")
+        if reason:
+            payload["reason"] = reason
+        return ToolResult(payload, updates)
 
     def apply_polygon_fix(context, repair_id):
         """Apply a staged repair proposal to the candidate layout transactionally."""
@@ -498,8 +291,8 @@ class DrcTools:
             if not digest:
                 raise ValueError("Missing candidate digest after checkpoint")
         except Exception:
-            if "old_polygon" in result and "new_polygon" in result and hasattr(layout, "rollback_replace"):
-                layout.rollback_replace(cell_name, polygon_id, result["old_polygon"], result["new_polygon"])
+            if hasattr(layout, "rollback_last_replace"):
+                layout.rollback_last_replace()
             raise
 
         updates = {
@@ -511,13 +304,9 @@ class DrcTools:
         if context.state.get("checklist"):
             checklist = Checklist.from_dict(context.state["checklist"])
             checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
-            checklist_path = Path(context.services.rundir) / "checklist.json"
-            if hasattr(context.services, "check_output_path"):
-                context.services.check_output_path(checklist_path)
-            checklist.save(checklist_path)
             updates["checklist"] = checklist_snapshot
             updates["checklist_digest"] = checklist_snapshot["digest"]
-            updates["checklist_path"] = str(checklist_path)
+            updates["checklist_path"] = None
 
         payload = {
             "status": "applied",
@@ -553,14 +342,10 @@ class DrcTools:
                     reason="Locally verified geometry pass on candidate layout (local geometry only, not full DRC deck clean)",
                     evidence=[evidence_rec],
                 )
-                checklist_path = Path(context.services.rundir) / "checklist.json"
-                if hasattr(context.services, "check_output_path"):
-                    context.services.check_output_path(checklist_path)
-                checklist.save(checklist_path)
                 updates = {
                     "checklist": snapshot,
                     "checklist_digest": snapshot["digest"],
-                    "checklist_path": str(checklist_path),
+                    "checklist_path": str(Path(context.services.rundir) / "checklist.json"),
                 }
         else:
             local_verified = False
@@ -576,6 +361,24 @@ class DrcTools:
         }
         return ToolResult(payload, updates)
 
+    def skip_plan_step(context, task_id, tool, reason):
+        """Explicitly record that a conditional active plan step was skipped with a reason."""
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("task_id must be a non-empty string")
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError("tool must be a non-empty string")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        return ToolResult(
+            {
+                "status": "skipped",
+                "skipped_task_id": task_id.strip(),
+                "skipped_tool": tool.strip(),
+                "reason": reason.strip(),
+            },
+            {},
+        )
+
     def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
         """Update one existing checklist task and persist the updated checklist atomically."""
         raw = context.state.get("checklist")
@@ -590,21 +393,33 @@ class DrcTools:
             polygon_ids=polygon_ids,
             evidence=evidence,
         )
-        checklist_path = Path(context.services.rundir) / "checklist.json"
-        context.services.check_output_path(checklist_path)
-        checklist.save(checklist_path)
         return ToolResult(
             snapshot,
             {
                 "checklist": snapshot,
                 "checklist_digest": snapshot["digest"],
-                "checklist_path": str(checklist_path),
+                "checklist_path": str(Path(context.services.rundir) / "checklist.json"),
             },
         )
+
+    def query_layout_region(context, cell_name, bounds_user, layers=None):
+        """Query additional candidate GDS geometry within bounds_user without editing state."""
+        layout = getattr(context.services, "layout", None)
+        if layout is None:
+            raise ValueError("Layout service is unavailable")
+        payload = ViolationGeometry().query_region(
+            layout,
+            cell_name,
+            bounds_user,
+            candidate_digest=context.state.get("candidate_digest"),
+            layer_specs=layers,
+        )
+        return ToolResult(payload, {})
 
     run = staticmethod(run)
     replace = staticmethod(replace)
     check_cover = staticmethod(check_cover)
+    _resolve_rule_inputs = staticmethod(_resolve_rule_inputs)
     read_checklist = staticmethod(read_checklist)
     get_violation = staticmethod(get_violation)
     find_rule = staticmethod(find_rule)
@@ -614,6 +429,7 @@ class DrcTools:
     apply_polygon_fix = staticmethod(apply_polygon_fix)
     recheck_violation = staticmethod(recheck_violation)
     update_checklist = staticmethod(update_checklist)
+    query_layout_region = staticmethod(query_layout_region)
 
 
 read_gds = DrcTools.run
@@ -780,6 +596,22 @@ recheck_violation.task_tool = ToolSpec(
     },
 )
 
+skip_plan_step = DrcTools.skip_plan_step
+skip_plan_step.task_tool = ToolSpec(
+    function=skip_plan_step,
+    description="Report that a conditional plan step (such as apply_polygon_fix or recheck_violation) was skipped for a task with a reason.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "tool": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["task_id", "tool", "reason"],
+        "additionalProperties": False,
+    },
+)
+
 update_checklist = DrcTools.update_checklist
 update_checklist.task_tool = ToolSpec(
     function=update_checklist,
@@ -795,6 +627,38 @@ update_checklist.task_tool = ToolSpec(
             "evidence": {"type": "array", "items": {"type": "object"}},
         },
         "required": ["task_id", "status", "reason"],
+        "additionalProperties": False,
+    },
+)
+
+query_layout_region = DrcTools.query_layout_region
+query_layout_region.task_tool = ToolSpec(
+    function=query_layout_region,
+    description="Query candidate GDS geometry in a user-unit bounding box [min_x, min_y, max_x, max_y] to expand evidence for the current task.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "cell_name": {"type": "string", "minLength": 1},
+            "bounds_user": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 4,
+                "maxItems": 4,
+            },
+            "layers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "layer": {"type": "integer"},
+                        "datatype": {"type": "integer"},
+                    },
+                    "required": ["layer", "datatype"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["cell_name", "bounds_user"],
         "additionalProperties": False,
     },
 )
