@@ -61,10 +61,20 @@ class OpenAIAdapter:
             raise ValueError('Missing agent_model_path in configuration')
         client = self.load_client()
         schema = self.contract.build_schema(tools, response_schema)
+        style = self.config.get('response_format_style', 'json_object')
+        if style == 'json_schema':
+            response_format = {
+                'type': 'json_schema',
+                'json_schema': {'name': 'fagent_response', 'schema': schema},
+            }
+        elif style == 'json_object':
+            response_format = {'type': 'json_object', 'schema': schema}
+        else:
+            raise ValueError(f'Unknown response_format_style: {style!r}')
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            response_format={'type': 'json_object', 'schema': schema},
+            response_format=response_format,
         )
         payload = response.model_dump() if hasattr(response, 'model_dump') else response
         if not isinstance(payload, dict):

@@ -14,39 +14,21 @@ inputs:
 backend: local
 nodes:
 - id: read
-  action: 
+  action:
     - steps:read_drc
     - steps:read_gds
   next: repair
-# - id: plan
-#   action: plan
-#   prompt: prompts/plan.md
-#   schema: schemas/plan.json
-#   next: repair
 - id: repair
   action: agent
-  next: END
+  next: save
   tools:
-  - tools:query_layout_region
-  - tools:replace_polygon
+  - tools:fix_cover
+  - tools:fix_area
   - tools:check_cover
-  # - tools:read_checklist
-  - tools:update_checklist
-  # - tools:get_violation
-  # - tools:find_rule
-  # - tools:find_related_polygons
-  # - tools:measure_violation
-  # - tools:propose_polygon_fix
-  # - tools:apply_polygon_fix
-  # - tools:recheck_violation
-  # - tools:skip_plan_step
-# - id: validate
-#   action: steps:validate_drc
-#   next: human_review
-# - id: human_review
-#   action: review
-#   next: END
-#   continue: repair
+  - tools:check_area
+  - tools:save_gds
+- id: save
+  action: steps:save_gds
+  next: END
 prepare: steps:prepare
 layout_services: true
-#knowledge_review: true

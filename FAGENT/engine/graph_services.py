@@ -6,8 +6,11 @@
 from hashlib import sha256
 import copy
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import gdstk
 
@@ -178,6 +181,7 @@ class GraphServices:
         raise ValueError(f'Unknown chat_backend: {backend!r}')
 
     def prepare(self, resume=False):
+        self.recover_candidate_transaction()
         op_id = None
         if hasattr(self, 'conversation_trace') and self.conversation_trace:
             op_id = self.conversation_trace.start_operation(
@@ -348,12 +352,82 @@ class GraphServices:
         return self.drc_context(self.layout.read_drc())
 
     def checkpoint_candidate(self):
-        candidate = self.layout.save_gds()['candidate']
-        digest = self.candidate_digest(Path(candidate))
+        """Atomically stage and commit candidate.gds and polygon_ids.json together."""
+        self.recover_candidate_transaction()
+        self.layout.check_output_path(self.layout.candidate)
+        ids_path = self.rundir / 'polygon_ids.json'
+        self.check_output_path(ids_path)
+        self.rundir.mkdir(parents=True, exist_ok=True)
+        self.layout.load_library()
         if self.layout.polygon_ids is None:
             raise ValueError('Polygon IDs are not initialized for candidate checkpoint')
-        self.layout.polygon_ids.save(self.rundir / 'polygon_ids.json', digest)
-        return candidate
+
+        tmp_gds = NamedTemporaryFile(dir=self.rundir, suffix='.gds', delete=False)
+        tmp_gds_path = Path(tmp_gds.name)
+        tmp_gds.close()
+        tmp_ids = NamedTemporaryFile(dir=self.rundir, suffix='.json', delete=False)
+        tmp_ids_path = Path(tmp_ids.name)
+        tmp_ids.close()
+        try:
+            self.layout.library.write_gds(str(tmp_gds_path))
+            digest = self.candidate_digest(tmp_gds_path)
+            if not digest:
+                raise ValueError('Missing candidate digest for staged GDS')
+            self.layout.polygon_ids.save(tmp_ids_path, digest)
+            previous = [(self.layout.candidate, self.rundir / '.candidate.previous'),
+                        (ids_path, self.rundir / '.polygon_ids.previous')]
+            existed = [target.is_file() for target, _ in previous]
+            for (target, backup), present in zip(previous, existed):
+                if present:
+                    shutil.copyfile(target, backup)
+            journal = self.rundir / '.candidate-transaction.json'
+            with NamedTemporaryFile('w', dir=self.rundir, delete=False, encoding='utf-8') as handle:
+                journal_tmp = Path(handle.name)
+                json.dump({'candidate_existed': existed[0], 'ids_existed': existed[1]}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            journal_tmp.replace(journal)
+            tmp_gds_path.replace(self.layout.candidate)
+            tmp_ids_path.replace(ids_path)
+            journal.unlink()
+            for _, backup in previous:
+                backup.unlink(missing_ok=True)
+            if getattr(self.layout, 'verbose', True):
+                print(f"    [Candidate] Candidate layout saved to {self.layout.candidate}")
+            return str(self.layout.candidate)
+        except Exception:
+            self.recover_candidate_transaction()
+            raise
+        finally:
+            tmp_gds_path.unlink(missing_ok=True)
+            tmp_ids_path.unlink(missing_ok=True)
+
+    def recover_candidate_transaction(self):
+        """Restore the previous pair after an interrupted candidate commit."""
+        journal = self.rundir / '.candidate-transaction.json'
+        if not journal.exists():
+            return
+        transaction = json.loads(journal.read_text(encoding='utf-8'))
+        pairs = [('candidate_existed', 'candidate.gds', '.candidate.previous'),
+                 ('ids_existed', 'polygon_ids.json', '.polygon_ids.previous')]
+        for key, name, backup_name in pairs:
+            target = self.rundir / name
+            backup = self.rundir / backup_name
+            if transaction[key]:
+                if not backup.is_file():
+                    raise ValueError(f'Missing candidate transaction backup: {backup}')
+                with NamedTemporaryFile(dir=self.rundir, delete=False) as handle:
+                    temporary = Path(handle.name)
+                try:
+                    shutil.copyfile(backup, temporary)
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            else:
+                target.unlink(missing_ok=True)
+        journal.unlink()
+        for _, _, backup_name in pairs:
+            (self.rundir / backup_name).unlink(missing_ok=True)
 
     def validate_drc(self, candidate):
         return DrcRunner(self.layout, candidate, self.workflow.backend).run()

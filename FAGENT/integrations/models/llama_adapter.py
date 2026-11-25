@@ -45,6 +45,7 @@ class StructuredChatContract:
         self.schema = None
         self.last_thinking = None
         self.message = None
+        self.raw_response = None
 
     # --------------------------------------------------------------------------
     # JSON Schema Composition
@@ -66,6 +67,7 @@ class StructuredChatContract:
     # Response Validation and Message Normalization
     # --------------------------------------------------------------------------
     def normalize_response(self, response, schema):
+        self.raw_response = response
         self.last_thinking = None
         try:
             if response['choices'][0].get('finish_reason') == 'length':

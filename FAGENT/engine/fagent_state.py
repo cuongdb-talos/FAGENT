@@ -63,3 +63,6 @@ class FagentState(TypedDict, total=False):
     current_task_id: str | None
     task_history: list[dict[str, Any]]
     task_message_start: int
+    task_transactions: dict[str, Any]
+    task_checks: dict[str, Any]
+    save_completed: bool

@@ -1,470 +1,499 @@
-"""Expose layout inspection and repair with explicit candidate evidence."""
+"""Expose the five DRC repair, check, and save tools with transactional candidate state."""
 
 # === SECTION 1: Imports ===
 import copy
+import shutil
 from pathlib import Path
 
-from FAGENT.capabilities.layout.cover_check import CoverCheck
-from FAGENT.capabilities.layout.repair_proposals import RepairProposals
-from FAGENT.capabilities.layout.violation_geometry import ViolationGeometry
+from FAGENT.capabilities.layout.cover_check import AreaCheck, CoverCheck
+from FAGENT.capabilities.layout.repair_proposals import AreaProposalBuilder, CoverProposalBuilder
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
-from FAGENT.tasks.drc.checklist import Checklist
 from FAGENT.tasks.drc.rule_evidence import RuleEvidence
 
 
-# === SECTION 2: Tools ===
+# === SECTION 2: Five-Tool DRC Handler Class ===
 class DrcTools:
-    """Inspect cells and save repairs to a candidate layout."""
+    """Five-tool DRC repair interface with staged proposals and atomic transactions."""
 
-    def run(context, cell_name):
-        """Read a cell and record successful inspection."""
-        report = context.services.layout.read_gds(cell_name=cell_name)
-        inspected = [*context.state.get("inspected", []), cell_name]
-        return ToolResult(report, {"inspected": inspected})
+    # --------------------------------------------------------------------------
+    # Main Entry Point & Initialization
+    # --------------------------------------------------------------------------
+    def run(self):
+        """Expose the five registered DRC tool specifications."""
+        self.tools = [fix_cover, fix_area, check_cover, check_area, save_gds]
+        return self.tools
 
     def __init__(self):
-        """Initialize stateless tool handlers."""
+        """Initialize stateless tool handler container."""
+        self.tools = []
 
-    def replace(context, cell_name, polygon_id, points):
-        """Require inspection, then save and fingerprint a modified candidate."""
-        if cell_name not in context.state.get("inspected", []):
-            raise ValueError("Inspect the target cell before editing")
-        layout = context.services.layout
-        result = layout.replace_polygon(cell_name=cell_name, polygon_id=polygon_id, points=points)
-        if result.get("status") != "modified":
-            return result
+    # --------------------------------------------------------------------------
+    # Public Tool Methods
+    # --------------------------------------------------------------------------
+    def fix_cover(
+        context,
+        task_id: str,
+        action: str,
+        inner_id: str | None = None,
+        groups: list[list[str]] | None = None,
+        proposal_id: str | None = None,
+    ) -> ToolResult:
+        """Propose or atomically apply a cover repair using model-selected polygon IDs."""
+        if action not in ("propose", "apply"):
+            return ToolResult({"status": "rejected", "reason": f"Unsupported action: {action}"}, {})
+        if action == "apply":
+            return DrcTools._apply_proposal(context, task_id=task_id, expected_kind="cover", proposal_id=proposal_id)
+
+        resolved, err = DrcTools._resolve_task_context(context, task_id)
+        if err:
+            return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
+
+        rule_ev = resolved["rule_evidence"]
+        min_enc = rule_ev.get("required_enclosure_user")
+        if min_enc is None and rule_ev.get("required_enclosure_dbu") is not None:
+            min_enc = float(rule_ev["required_enclosure_dbu"]) * resolved["grid"]
+        if min_enc is None:
+            min_enc = 0.0
+
+        if not inner_id or not isinstance(groups, list) or not groups or any(not g for g in groups):
+            return ToolResult({"status": "unknown", "reason": "inner_id and non-empty groups are required", "proposals": []}, {})
+
+        layout = resolved["layout"]
+        cell_name = resolved["cell_name"]
         try:
-            candidate = context.services.checkpoint_candidate()
-            digest = GraphServices.candidate_digest(Path(candidate))
-            if not digest:
-                raise ValueError("Missing candidate digest")
-        except (OSError, ValueError, RuntimeError, KeyError) as exc:
-            if hasattr(layout, "rollback_last_replace"):
-                layout.rollback_last_replace()
-            return ToolResult({"error": type(exc).__name__}, {"candidate_path": None, "candidate_digest": None, "validation": None})
-        updates = {"candidate_path": str(candidate), "candidate_digest": digest, "validation": None}
-        if context.state.get("checklist"):
-            checklist = Checklist.from_dict(context.state["checklist"])
-            checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
-            updates["checklist"] = checklist_snapshot
-            updates["checklist_digest"] = checklist_snapshot["digest"]
-            updates["checklist_path"] = None
-        return ToolResult(result, updates)
+            inner_pts = layout.polygon_ids.resolve(cell_name, inner_id).points.tolist()
+            group_pts = [
+                [layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in grp]
+                for grp in groups
+            ]
+        except (KeyError, ValueError, TypeError) as exc:
+            return ToolResult({"status": "unknown", "reason": f"Unknown polygon_id: {exc}", "proposals": []}, {})
 
-    def check_cover(context, cell_name, inner_id, outer_id, minimum):
-        """Evaluate geometric enclosure between two direct polygons identified by stable IDs."""
-        layout = context.services.layout
-        try:
-            layout.get_cell(cell_name)
-            inner_poly = layout.polygon_ids.resolve(cell_name, inner_id)
-            outer_poly = layout.polygon_ids.resolve(cell_name, outer_id)
-            precision = float(layout.library.precision) / float(layout.library.unit)
-            result = CoverCheck().run(inner_poly, outer_poly, minimum=minimum, precision=precision)
-        except (OSError, ValueError, RuntimeError, TypeError) as exc:
-            result = {
-                "status": "unknown",
-                "minimum": minimum,
-                "measured_distance": None,
-                "units": "gds_user_units",
-                "violations": [],
-                "reason": str(exc),
-            }
-        payload = {"cell": cell_name, "inner_id": inner_id, "outer_id": outer_id, **result}
-        return ToolResult(payload, {})
-
-    def _resolve_rule_inputs(context):
-        """Resolve DRC deck paths and physical layer map files from services, layout, or config."""
-        services = context.services
-        cfg = getattr(services, "config", {}) or {}
-        input_sources = getattr(services, "input_sources", None) or {}
-        layout = getattr(services, "layout", None)
-        gds_data = getattr(layout, "gds_data", None) or {}
-
-        deck_paths = (
-            getattr(services, "drc_files", None)
-            or input_sources.get("decks")
-            or getattr(layout, "drc_files", None)
-            or cfg.get("drc_files", [])
+        built = CoverProposalBuilder().run(
+            inner_points=inner_pts,
+            groups=group_pts,
+            minimum_enclosure=float(min_enc),
+            grid=resolved["grid"],
+            inner_id=inner_id,
+            group_ids=groups,
         )
-        layer_maps = (
-            getattr(services, "layer_maps", None)
-            or input_sources.get("layer_maps")
-            or gds_data.get("layer_maps")
-            or cfg.get("layer_maps", [])
-            or cfg.get("layer_map_files", [])
-        )
-        references = context.state.get("drc_context", {}).get("knowledge", {}).get("references", [])
-        return deck_paths, layer_maps, references
-
-    def read_checklist(context):
-        """Return the current run-scoped violation checklist."""
-        raw = context.state.get("checklist")
-        if not raw:
-            raise ValueError("Checklist has not been initialized for this run")
-        checklist = Checklist.from_dict(raw)
-        return ToolResult(checklist.read(), {})
-
-    def get_violation(context, task_id):
-        """Lookup source DRC violation record, marker coordinates, task state, and candidate identity."""
-        raw = context.state.get("checklist")
-        if not raw:
-            raise ValueError("Checklist has not been initialized for this run")
-        checklist = Checklist.from_dict(raw)
-        task = next((t for t in checklist.tasks if t.get("task_id") == task_id), None)
-        if task is None:
-            raise ValueError(f"Unknown checklist task_id: {task_id}")
-
-        report = context.state.get("report")
-        if not report and hasattr(context.services, "drc_report"):
-            report = context.services.drc_report
-        if not report and context.state.get("drc_context"):
-            report = context.state["drc_context"].get("drc")
-        if not report:
-            raise ValueError("DRC report data is unavailable in context")
-
-        rule_name = task.get("rule")
-        vid = task.get("violation_id")
-        occ = task.get("occurrence", 0)
-
-        matched_geom = None
-        for r in report.get("rules", []):
-            if r.get("name") == rule_name:
-                current_occ = 0
-                for g in r.get("geometry", []):
-                    if g.get("id") == vid:
-                        if current_occ == occ:
-                            matched_geom = g
-                            break
-                        current_occ += 1
-                if matched_geom is not None:
-                    break
-
-        candidate_path = context.state.get("candidate_path")
-        candidate_digest = context.state.get("candidate_digest")
-
-        payload = {
-            "task": copy.deepcopy(task),
-            "violation": copy.deepcopy(matched_geom) if matched_geom else None,
-            "rule": rule_name,
-            "owning_cell": report.get("top_cell"),
-            "dbu_per_user_unit": report.get("dbu_per_user_unit"),
-            "source": report.get("source"),
-            "candidate_path": candidate_path,
-            "candidate_digest": candidate_digest,
-        }
-        return ToolResult(payload, {})
-
-    def find_rule(context, task_id):
-        """Retrieve original rule text, source locations, and physical layer maps."""
-        raw = context.state.get("checklist")
-        if not raw:
-            raise ValueError("Checklist has not been initialized for this run")
-        checklist = Checklist.from_dict(raw)
-        task = next((t for t in checklist.tasks if t.get("task_id") == task_id), None)
-        if task is None:
-            raise ValueError(f"Unknown checklist task_id: {task_id}")
-
-        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
-
-        if not deck_paths:
-            evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        return ToolResult(evidence, {})
-
-    def find_related_polygons(context, task_id, search_margin_dbu=0):
-        """Resolve DRC marker to candidate layout polygons with candidate digest binding."""
-        v_result = DrcTools.get_violation(context, task_id)
-        task = v_result.payload.get("task") or {}
-        task["violation"] = v_result.payload.get("violation")
-        task["owning_cell"] = v_result.payload.get("owning_cell")
-
-        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
-
-        if not deck_paths:
-            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        geom_result = ViolationGeometry().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-            search_margin_dbu=search_margin_dbu,
-        )
-        return ToolResult(geom_result, {})
-
-    def measure_violation(context, task_id, polygon_ids=None):
-        """Measure geometric enclosure or distance for a specific violation task."""
-        v_result = DrcTools.get_violation(context, task_id)
-        task = v_result.payload.get("task") or {}
-        task["violation"] = v_result.payload.get("violation")
-        task["owning_cell"] = v_result.payload.get("owning_cell")
-
-        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
-
-        if not deck_paths:
-            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        geom_result = ViolationGeometry().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        proposals_result = RepairProposals().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            geometry=geom_result,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        return ToolResult(proposals_result["measurement"], {})
-
-    def propose_polygon_fix(context, task_id, polygon_ids=None):
-        """Generate deterministic repair proposals for a measured violation."""
-        v_result = DrcTools.get_violation(context, task_id)
-        task = v_result.payload.get("task") or {}
-        task["violation"] = v_result.payload.get("violation")
-        task["owning_cell"] = v_result.payload.get("owning_cell")
-
-        deck_paths, layer_maps, references = DrcTools._resolve_rule_inputs(context)
-
-        if not deck_paths:
-            rule_evidence = {'rule': task.get('rule'), 'found': False, 'supported': False, 'reason': 'No DRC rule decks configured', 'layer_mapping': {}}
-        else:
-            rule_evidence = RuleEvidence().run(task, deck_paths=deck_paths, layer_maps=layer_maps, references=references)
-        geom_result = ViolationGeometry().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        proposals_result = RepairProposals().run(
-            task=task,
-            rule_evidence=rule_evidence,
-            geometry=geom_result,
-            layout=context.services.layout,
-            candidate_digest=context.state.get("candidate_digest"),
-        )
-        proposals_list = proposals_result["proposals"]
-        proposals_map = {p["repair_id"]: p for p in proposals_list}
-        existing = dict(context.state.get("proposals") or {})
-        existing.update(proposals_map)
-        updates = {"proposals": existing}
-        payload = {"task_id": task_id, "proposals": proposals_list}
-        reason = proposals_result.get("reason") or proposals_result.get("measurement", {}).get("reason", "")
-        if reason:
-            payload["reason"] = reason
-        return ToolResult(payload, updates)
-
-    def apply_polygon_fix(context, repair_id):
-        """Apply a staged repair proposal to the candidate layout transactionally."""
-        proposals = context.state.get("proposals") or {}
-        proposal = proposals.get(repair_id)
-        if not proposal:
-            raise ValueError(f"Unknown repair_id: {repair_id}")
-
-        expected_digest = proposal.get("candidate_digest")
-        current_digest = context.state.get("candidate_digest")
-        if expected_digest != current_digest:
-            raise ValueError(f"Stale repair proposal {repair_id}: candidate layout has changed (expected {expected_digest}, current {current_digest})")
-
-        assumptions = proposal.get("rule_assumptions", "")
-        if not assumptions:
-            raise ValueError("Proposal lacking verified rule assumptions cannot be applied")
-
-        cell_name = proposal["cell"]
-        polygon_id = proposal["target_polygon_id"]
-        points = proposal["after_points_user"]
-
-        layout = context.services.layout
-        result = layout.replace_polygon(cell_name=cell_name, polygon_id=polygon_id, points=points)
-        if result.get("status") != "modified":
-            return ToolResult(result, {})
-
-        try:
-            candidate = context.services.checkpoint_candidate()
-            digest = GraphServices.candidate_digest(Path(candidate))
-            if not digest:
-                raise ValueError("Missing candidate digest after checkpoint")
-        except Exception:
-            if hasattr(layout, "rollback_last_replace"):
-                layout.rollback_last_replace()
-            raise
-
-        updates = {
-            "candidate_path": str(candidate),
-            "candidate_digest": digest,
-            "validation": None,
-            "proposals": {},
-        }
-        if context.state.get("checklist"):
-            checklist = Checklist.from_dict(context.state["checklist"])
-            checklist_snapshot = checklist.invalidate(cell_name, polygon_id)
-            updates["checklist"] = checklist_snapshot
-            updates["checklist_digest"] = checklist_snapshot["digest"]
-            updates["checklist_path"] = None
-
-        payload = {
-            "status": "applied",
-            "repair_id": repair_id,
-            "cell": cell_name,
-            "polygon_id": polygon_id,
-            "candidate_digest": digest,
-        }
-        return ToolResult(payload, updates)
-
-    def recheck_violation(context, task_id):
-        """Evaluate supported local geometry on the saved candidate layout."""
-        meas_res = DrcTools.measure_violation(context, task_id)
-        meas = meas_res.payload
-        status = meas.get("status")
-        candidate_digest = context.state.get("candidate_digest")
-
-        updates = {}
-        if status == "pass":
-            local_verified = True
-            raw = context.state.get("checklist")
-            if raw:
-                checklist = Checklist.from_dict(raw)
-                evidence_rec = {
-                    "type": "local_geometry_recheck",
-                    "status": "pass",
-                    "candidate_digest": candidate_digest,
-                    "measurement": meas,
-                }
-                snapshot = checklist.update(
-                    task_id=task_id,
-                    status="pass",
-                    reason="Locally verified geometry pass on candidate layout (local geometry only, not full DRC deck clean)",
-                    evidence=[evidence_rec],
-                )
-                updates = {
-                    "checklist": snapshot,
-                    "checklist_digest": snapshot["digest"],
-                    "checklist_path": str(Path(context.services.rundir) / "checklist.json"),
-                }
-        else:
-            local_verified = False
-
-        payload = {
-            "status": status,
-            "task_id": task_id,
-            "local_verified": local_verified,
-            "deck_clean": False,
-            "notice": "Local geometry recheck only; not a deck-level DRC pass.",
-            "measurement": meas,
-            "candidate_digest": candidate_digest,
-        }
-        return ToolResult(payload, updates)
-
-    def skip_plan_step(context, task_id, tool, reason):
-        """Explicitly record that a conditional active plan step was skipped with a reason."""
-        if not isinstance(task_id, str) or not task_id.strip():
-            raise ValueError("task_id must be a non-empty string")
-        if not isinstance(tool, str) or not tool.strip():
-            raise ValueError("tool must be a non-empty string")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("reason must be a non-empty string")
-        return ToolResult(
-            {
-                "status": "skipped",
-                "skipped_task_id": task_id.strip(),
-                "skipped_tool": tool.strip(),
-                "reason": reason.strip(),
-            },
-            {},
-        )
-
-    def update_checklist(context, task_id, status, work=None, reason="", polygon_ids=None, evidence=None):
-        """Update one existing checklist task and persist the updated checklist atomically."""
-        raw = context.state.get("checklist")
-        if not raw:
-            raise ValueError("Checklist has not been initialized for this run")
-        checklist = Checklist.from_dict(raw)
-        snapshot = checklist.update(
+        return DrcTools._stage_built_proposals(
+            context,
+            resolved=resolved,
             task_id=task_id,
-            status=status,
-            work=work,
-            reason=reason,
-            polygon_ids=polygon_ids,
-            evidence=evidence,
+            kind="cover",
+            built=built,
+            bound_inputs={"inner_id": inner_id, "groups": groups, "minimum_enclosure": float(min_enc)},
         )
+
+    def fix_area(
+        context,
+        task_id: str,
+        action: str,
+        polygon_id: str | None = None,
+        minimum_area: float | None = None,
+        proposal_id: str | None = None,
+    ) -> ToolResult:
+        """Propose or atomically apply an area repair using a model-selected polygon ID."""
+        if action not in ("propose", "apply"):
+            return ToolResult({"status": "rejected", "reason": f"Unsupported action: {action}"}, {})
+        if action == "apply":
+            return DrcTools._apply_proposal(context, task_id=task_id, expected_kind="area", proposal_id=proposal_id)
+
+        resolved, err = DrcTools._resolve_task_context(context, task_id)
+        if err:
+            return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
+
+        rule_ev = resolved["rule_evidence"]
+        min_area = minimum_area if minimum_area is not None else (
+            rule_ev.get("minimum_area_user") if rule_ev.get("minimum_area_user") is not None else rule_ev.get("required_area_user")
+        )
+        if min_area is None:
+            return ToolResult({"status": "unknown", "reason": "Missing minimum_area in arguments or rule evidence", "proposals": []}, {})
+        if not polygon_id:
+            return ToolResult({"status": "unknown", "reason": "polygon_id is required", "proposals": []}, {})
+
+        layout = resolved["layout"]
+        cell_name = resolved["cell_name"]
+        try:
+            poly_pts = layout.polygon_ids.resolve(cell_name, polygon_id).points.tolist()
+        except (KeyError, ValueError, TypeError) as exc:
+            return ToolResult({"status": "unknown", "reason": f"Unknown polygon_id: {exc}", "proposals": []}, {})
+
+        built = AreaProposalBuilder().run(
+            polygon_points=poly_pts,
+            minimum_area=float(min_area),
+            grid=resolved["grid"],
+            polygon_id=polygon_id,
+        )
+        return DrcTools._stage_built_proposals(
+            context,
+            resolved=resolved,
+            task_id=task_id,
+            kind="area",
+            built=built,
+            bound_inputs={"polygon_id": polygon_id, "minimum_area": float(min_area)},
+        )
+
+    def check_cover(context, task_id: str) -> ToolResult:
+        """Verify staged cover transaction on live layout; rollback all task edits on failure."""
+        return DrcTools._check_transaction(context, task_id=task_id, expected_kind="cover")
+
+    def check_area(context, task_id: str) -> ToolResult:
+        """Verify staged area transaction on live layout; rollback all task edits on failure."""
+        return DrcTools._check_transaction(context, task_id=task_id, expected_kind="area")
+
+    def save_gds(context) -> ToolResult:
+        """Save the final verified candidate GDS once the task queue is complete."""
+        if context.state.get("current_task_id") or context.state.get("task_queue"):
+            return ToolResult(
+                {"status": "rejected", "reason": "save_gds is only available after queue completion"},
+                {},
+            )
+        saved = Path(context.services.checkpoint_candidate())
+        digest = GraphServices.candidate_digest(saved)
+        if not digest:
+            raise ValueError("Missing candidate digest after save_gds")
+
+        history = context.state.get("task_history") or []
+        summary = {
+            "total": len(history),
+            "pass": sum(1 for item in history if item.get("status") == "pass"),
+            "unresolved": sum(1 for item in history if item.get("status") == "unresolved"),
+        }
         return ToolResult(
-            snapshot,
+            {"status": "saved", "output_path": str(saved), "digest": digest, "task_summary": summary},
+            {"candidate_path": str(saved), "candidate_digest": digest, "save_completed": True},
+        )
+
+    # --------------------------------------------------------------------------
+    # Internal Transaction & Resolution Helpers
+    # --------------------------------------------------------------------------
+    def _resolve_task_context(context, task_id: str) -> tuple[dict | None, str | None]:
+        """Resolve task, rule evidence, physical layer mapping, cell, and GDS grid."""
+        checklist = context.state.get("checklist") or {}
+        task = next((t for t in checklist.get("tasks", []) if t.get("task_id") == task_id), None)
+        if task is None:
+            return None, f"Unknown task_id: {task_id}"
+
+        drc_ctx = context.state.get("drc_context") or {}
+        rule_name = task.get("rule")
+        layer_map = drc_ctx.get("layer_mapping") or {}
+        rule_ev_map = drc_ctx.get("rule_evidence") or {}
+        rule_ev = rule_ev_map.get(rule_name)
+
+        layout = context.services.layout
+        layout.load_library()
+
+        if rule_ev is None and not rule_ev_map:
+            cfg = getattr(context.services, "config", None) or {}
+            input_sources = getattr(context.services, "input_sources", None) or {}
+            gds_data = getattr(layout, "gds_data", None) or {}
+            deck_paths = (
+                getattr(context.services, "drc_files", None)
+                or input_sources.get("decks")
+                or cfg.get("drc_files", [])
+            )
+            layer_maps = (
+                getattr(context.services, "layer_maps", None)
+                or input_sources.get("layer_maps")
+                or gds_data.get("layer_maps")
+                or cfg.get("layer_maps", [])
+                or cfg.get("layer_map_files", [])
+            )
+            if deck_paths:
+                rule_ev = RuleEvidence().run(task=task, deck_paths=deck_paths, layer_maps=layer_maps)
+                if not layer_map:
+                    layer_map = rule_ev.get("layer_mapping") or {}
+
+        if not layer_map:
+            return None, "Missing physical layer_mapping"
+        if not rule_ev or rule_ev.get("supported") is False:
+            reason = (rule_ev or {}).get("reason") or f"Unsupported or missing rule evidence for {rule_name}"
+            return None, reason
+        cell_name = (
+            task.get("cell")
+            or (context.state.get("report") or {}).get("top_cell")
+            or (layout.gds_data or {}).get("top_cell")
+        )
+        if not cell_name:
+            return None, "Missing target cell_name"
+
+        grid = float(layout.library.precision) / float(layout.library.unit)
+        digest = context.state.get("candidate_digest") or GraphServices.candidate_digest(Path(layout.gds_path))
+        return {
+            "task": task,
+            "rule_evidence": rule_ev,
+            "layer_mapping": layer_map,
+            "layout": layout,
+            "cell_name": cell_name,
+            "grid": grid,
+            "candidate_digest": digest,
+        }, None
+
+    def _stage_built_proposals(
+        context,
+        resolved: dict,
+        task_id: str,
+        kind: str,
+        built: dict,
+        bound_inputs: dict,
+    ) -> ToolResult:
+        """Filter no-op proposals, stage valid ones in state, and return ToolResult."""
+        if built.get("status") != "fail" or not built.get("proposals"):
+            return ToolResult(
+                {
+                    "status": built.get("status", "unknown"),
+                    "measurement": built.get("measurement"),
+                    "proposals": [],
+                    "reason": built.get("reason", ""),
+                },
+                {},
+            )
+
+        store = copy.deepcopy(context.state.get("proposals") or {})
+        staged = []
+        for idx, prop in enumerate(built["proposals"], start=1):
+            changes = prop.get("changes") or []
+            if not DrcTools._changes_modify_geometry(changes, resolved["grid"]):
+                continue
+            pid = f"{task_id}-{kind}-p{len(store) + idx}"
+            record = {
+                "proposal_id": pid,
+                "task_id": task_id,
+                "kind": kind,
+                "cell_name": resolved["cell_name"],
+                "candidate_digest": resolved["candidate_digest"],
+                "changes": changes,
+                "affected_ids": [c["polygon_id"] for c in changes],
+                "rule_assumptions": prop.get("rule_assumptions", ""),
+                "local_check": prop.get("local_check"),
+                "bound_inputs": bound_inputs,
+            }
+            store[pid] = record
+            staged.append(record)
+
+        if not staged:
+            return ToolResult(
+                {"status": "rejected", "reason": "No-op proposal: geometry unchanged", "proposals": []},
+                {},
+            )
+        return ToolResult(
+            {"status": "proposed", "measurement": built.get("measurement"), "proposals": staged},
+            {"proposals": store},
+        )
+
+    def _apply_proposal(context, task_id: str, expected_kind: str, proposal_id: str | None) -> ToolResult:
+        """Validate digest and no-op status, then atomically apply and checkpoint all changes."""
+        if not proposal_id:
+            return ToolResult({"status": "rejected", "reason": "proposal_id is required for apply"}, {})
+        store = context.state.get("proposals") or {}
+        prop = store.get(proposal_id)
+        if not prop or prop.get("task_id") != task_id or prop.get("kind") != expected_kind:
+            return ToolResult({"status": "rejected", "reason": f"Unknown or mismatched proposal_id: {proposal_id}"}, {})
+
+        layout = context.services.layout
+        layout.load_library()
+        current_digest = context.state.get("candidate_digest") or GraphServices.candidate_digest(Path(layout.gds_path))
+        if prop.get("candidate_digest") != current_digest:
+            return ToolResult(
+                {"status": "rejected", "reason": "Stale proposal: candidate_digest does not match current candidate"},
+                {},
+            )
+
+        changes = prop.get("changes") or []
+        grid = float(layout.library.precision) / float(layout.library.unit)
+        cell_name = prop["cell_name"]
+        live_changes = []
+        for ch in changes:
+            live_pts = layout.polygon_ids.resolve(cell_name, ch["polygon_id"]).points.tolist()
+            live_changes.append({"before_points_user": live_pts, "after_points_user": ch["after_points_user"]})
+        if not DrcTools._changes_modify_geometry(live_changes, grid):
+            return ToolResult({"status": "rejected", "reason": "No-op proposal: live geometry already matches"}, {})
+
+        pre_apply_path = context.state.get("candidate_path")
+        backup_path = None
+        if pre_apply_path and Path(pre_apply_path).is_file():
+            backup_path = context.services.rundir / f".pre_tx_{task_id}.gds"
+            shutil.copyfile(pre_apply_path, backup_path)
+
+        batch = [{"polygon_id": ch["polygon_id"], "points": ch["after_points_user"]} for ch in changes]
+        snapshot = layout.apply_polygon_changes(cell_name, batch)
+        try:
+            candidate = Path(context.services.checkpoint_candidate())
+            new_digest = GraphServices.candidate_digest(candidate)
+            if not new_digest:
+                raise ValueError("Missing candidate digest")
+        except Exception as exc:
+            layout.rollback_transaction(snapshot)
+            if backup_path is not None:
+                backup_path.unlink(missing_ok=True)
+            return ToolResult({"status": "error", "reason": f"Candidate save failed: {exc}"}, {})
+
+        tx_map = copy.deepcopy(context.state.get("task_transactions") or {})
+        tx_map[task_id] = {
+            "proposal_id": proposal_id,
+            "kind": expected_kind,
+            "cell_name": cell_name,
+            "pre_apply_digest": current_digest,
+            "pre_apply_path": pre_apply_path,
+            "pre_apply_backup": str(backup_path) if backup_path else None,
+            "changes": changes,
+            "bound_inputs": prop.get("bound_inputs", {}),
+        }
+        return ToolResult(
             {
-                "checklist": snapshot,
-                "checklist_digest": snapshot["digest"],
-                "checklist_path": str(Path(context.services.rundir) / "checklist.json"),
+                "status": "applied",
+                "proposal_id": proposal_id,
+                "candidate_digest": new_digest,
+                "changes": changes,
+            },
+            {
+                "candidate_path": str(candidate),
+                "candidate_digest": new_digest,
+                "task_transactions": tx_map,
+                "validation": None,
             },
         )
 
-    def query_layout_region(context, cell_name, bounds_user, layers=None):
-        """Query additional candidate GDS geometry within bounds_user without editing state."""
-        layout = getattr(context.services, "layout", None)
-        if layout is None:
-            raise ValueError("Layout service is unavailable")
-        payload = ViolationGeometry().query_region(
-            layout,
-            cell_name,
-            bounds_user,
-            candidate_digest=context.state.get("candidate_digest"),
-            layer_specs=layers,
+    def _check_transaction(context, task_id: str, expected_kind: str) -> ToolResult:
+        """Run local check against live layout for staged task transaction; rollback on failure."""
+        tx_map = copy.deepcopy(context.state.get("task_transactions") or {})
+        tx = tx_map.get(task_id)
+        if not tx or tx.get("kind") != expected_kind:
+            return ToolResult({"status": "unknown", "deck_clean": False, "reason": "No staged transaction for task"}, {})
+
+        resolved, err = DrcTools._resolve_task_context(context, task_id)
+        if err:
+            return ToolResult({"status": "unknown", "deck_clean": False, "reason": err}, {})
+
+        layout = resolved["layout"]
+        cell_name = tx["cell_name"]
+        grid = resolved["grid"]
+        bound = tx.get("bound_inputs", {})
+        rule_ev = resolved["rule_evidence"]
+
+        if expected_kind == "cover":
+            min_enc = rule_ev.get("required_enclosure_user")
+            if min_enc is None:
+                min_enc = bound.get("minimum_enclosure", 0.0)
+            inner_pts = layout.polygon_ids.resolve(cell_name, bound["inner_id"]).points.tolist()
+            group_pts = [
+                [layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in grp]
+                for grp in bound["groups"]
+            ]
+            res = CoverCheck().run(inner=inner_pts, groups=group_pts, minimum=float(min_enc), precision=grid)
+        else:
+            min_area = rule_ev.get("minimum_area_user")
+            if min_area is None:
+                min_area = bound.get("minimum_area", 0.0)
+            poly_pts = layout.polygon_ids.resolve(cell_name, bound["polygon_id"]).points.tolist()
+            res = AreaCheck().run(polygon=poly_pts, minimum_area=float(min_area), precision=grid)
+
+        checks_map = copy.deepcopy(context.state.get("task_checks") or {})
+        current_digest = context.state.get("candidate_digest")
+        backup_str = tx.get("pre_apply_backup")
+        backup_path = Path(backup_str) if backup_str else None
+        if res.get("status") == "pass":
+            if backup_path is not None:
+                backup_path.unlink(missing_ok=True)
+            checks_map[task_id] = {
+                "status": "pass",
+                "deck_clean": False,
+                "candidate_digest": current_digest,
+                "measurement": res,
+            }
+            return ToolResult(
+                {"status": "pass", "deck_clean": False, "candidate_digest": current_digest, "measurement": res},
+                {"task_checks": checks_map},
+            )
+
+        revert_batch = [{"polygon_id": ch["polygon_id"], "points": ch["before_points_user"]} for ch in tx["changes"]]
+        layout.apply_polygon_changes(cell_name, revert_batch)
+        if backup_path is not None and backup_path.is_file():
+            shutil.copyfile(backup_path, layout.candidate)
+            backup_path.unlink(missing_ok=True)
+            candidate = Path(layout.candidate)
+            restored_digest = tx["pre_apply_digest"]
+            layout.polygon_ids.save(context.services.rundir / "polygon_ids.json", restored_digest)
+        else:
+            candidate = Path(context.services.checkpoint_candidate())
+            restored_digest = GraphServices.candidate_digest(candidate)
+        tx_map.pop(task_id, None)
+        checks_map[task_id] = {
+            "status": res.get("status", "fail"),
+            "rolled_back": True,
+            "deck_clean": False,
+            "candidate_digest": restored_digest,
+            "measurement": res,
+        }
+        return ToolResult(
+            {
+                "status": res.get("status", "fail"),
+                "rolled_back": True,
+                "deck_clean": False,
+                "candidate_digest": restored_digest,
+                "measurement": res,
+            },
+            {
+                "candidate_path": str(candidate),
+                "candidate_digest": restored_digest,
+                "task_transactions": tx_map,
+                "task_checks": checks_map,
+            },
         )
-        return ToolResult(payload, {})
 
-    run = staticmethod(run)
-    replace = staticmethod(replace)
-    check_cover = staticmethod(check_cover)
-    _resolve_rule_inputs = staticmethod(_resolve_rule_inputs)
-    read_checklist = staticmethod(read_checklist)
-    get_violation = staticmethod(get_violation)
-    find_rule = staticmethod(find_rule)
-    find_related_polygons = staticmethod(find_related_polygons)
-    measure_violation = staticmethod(measure_violation)
-    propose_polygon_fix = staticmethod(propose_polygon_fix)
-    apply_polygon_fix = staticmethod(apply_polygon_fix)
-    recheck_violation = staticmethod(recheck_violation)
-    update_checklist = staticmethod(update_checklist)
-    query_layout_region = staticmethod(query_layout_region)
+    def _changes_modify_geometry(changes: list[dict], grid: float) -> bool:
+        """Return True when at least one change alters polygon coordinates beyond grid tolerance."""
+        tol = grid * 0.1
+        for ch in changes:
+            before = ch.get("before_points_user") or []
+            after = ch.get("after_points_user") or []
+            if len(before) != len(after):
+                return True
+            for p_b, p_a in zip(before, after):
+                if abs(float(p_b[0]) - float(p_a[0])) > tol or abs(float(p_b[1]) - float(p_a[1])) > tol:
+                    return True
+        return False
 
 
-read_gds = DrcTools.run
-read_gds.task_tool = ToolSpec(
-    function=read_gds,
-    description="Inspect direct polygons in GDS user units before editing.",
+# === SECTION 3: ToolSpec Registrations ===
+fix_cover = DrcTools.fix_cover
+fix_cover.task_tool = ToolSpec(
+    function=fix_cover,
+    description="Propose or apply a cover repair for a task using model-selected inner_id and polygon groups.",
     parameters={
         "type": "object",
-        "properties": {"cell_name": {"type": "string"}},
-        "required": ["cell_name"],
+        "properties": {
+            "task_id": {"type": "string"},
+            "action": {"type": "string", "enum": ["propose", "apply"]},
+            "inner_id": {"type": "string"},
+            "groups": {
+                "type": "array",
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+            "proposal_id": {"type": "string"},
+        },
+        "required": ["task_id", "action"],
         "additionalProperties": False,
     },
 )
 
-replace_polygon = DrcTools.replace
-replace_polygon.task_tool = ToolSpec(
-    function=replace_polygon,
-    description="Replace one direct polygon by stable polygon_id in GDS user units. Convert DBU coordinates using dbu_per_user_unit.",
+fix_area = DrcTools.fix_area
+fix_area.task_tool = ToolSpec(
+    function=fix_area,
+    description="Propose or apply an area repair for a task using a model-selected polygon_id and minimum_area.",
     parameters={
         "type": "object",
         "properties": {
-            "cell_name": {"type": "string"},
+            "task_id": {"type": "string"},
+            "action": {"type": "string", "enum": ["propose", "apply"]},
             "polygon_id": {"type": "string"},
-            "points": {
-                "type": "array",
-                "minItems": 3,
-                "items": {
-                    "type": "array",
-                    "minItems": 2,
-                    "maxItems": 2,
-                    "items": {"type": "number"},
-                },
-            },
+            "minimum_area": {"type": "number"},
+            "proposal_id": {"type": "string"},
         },
-        "required": ["cell_name", "polygon_id", "points"],
+        "required": ["task_id", "action"],
         "additionalProperties": False,
     },
 )
@@ -472,193 +501,38 @@ replace_polygon.task_tool = ToolSpec(
 check_cover = DrcTools.check_cover
 check_cover.task_tool = ToolSpec(
     function=check_cover,
-    description="Check geometric enclosure between an inner polygon and an outer covering polygon by stable polygon_id in GDS user units.",
+    description="Check staged cover edits for a task against bound inputs; rolls back task edits on failure.",
     parameters={
         "type": "object",
         "properties": {
-            "cell_name": {"type": "string"},
-            "inner_id": {"type": "string"},
-            "outer_id": {"type": "string"},
-            "minimum": {"type": "number"},
+            "task_id": {"type": "string"},
         },
-        "required": ["cell_name", "inner_id", "outer_id", "minimum"],
+        "required": ["task_id"],
         "additionalProperties": False,
     },
 )
 
-read_checklist = DrcTools.read_checklist
-read_checklist.task_tool = ToolSpec(
-    function=read_checklist,
-    description="Read the current run-scoped DRC repair checklist and task statuses.",
+check_area = DrcTools.check_area
+check_area.task_tool = ToolSpec(
+    function=check_area,
+    description="Check staged area edit for a task against minimum_area; rolls back task edit on failure.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+        },
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+save_gds = DrcTools.save_gds
+save_gds.task_tool = ToolSpec(
+    function=save_gds,
+    description="Save the final verified candidate GDS after all queued tasks are complete.",
     parameters={
         "type": "object",
         "properties": {},
-        "additionalProperties": False,
-    },
-)
-
-get_violation = DrcTools.get_violation
-get_violation.task_tool = ToolSpec(
-    function=get_violation,
-    description="Lookup source DRC violation record, marker coordinates, task state, and candidate identity.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-        },
-        "required": ["task_id"],
-        "additionalProperties": False,
-    },
-)
-
-find_rule = DrcTools.find_rule
-find_rule.task_tool = ToolSpec(
-    function=find_rule,
-    description="Retrieve named rule text, line numbers, and physical layer maps from the rule deck.",
-    parameters={
-        "type": "object",
-        "properties": {"task_id": {"type": "string"}},
-        "required": ["task_id"],
-        "additionalProperties": False,
-    },
-)
-
-find_related_polygons = DrcTools.find_related_polygons
-find_related_polygons.task_tool = ToolSpec(
-    function=find_related_polygons,
-    description="Find live layout polygons overlapping the DRC violation marker on physical layers.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "search_margin_dbu": {"type": "number"},
-        },
-        "required": ["task_id"],
-        "additionalProperties": False,
-    },
-)
-
-measure_violation = DrcTools.measure_violation
-measure_violation.task_tool = ToolSpec(
-    function=measure_violation,
-    description="Measure geometric enclosure or distances for a violation task against physical layout polygons.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "polygon_ids": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["task_id"],
-        "additionalProperties": False,
-    },
-)
-
-propose_polygon_fix = DrcTools.propose_polygon_fix
-propose_polygon_fix.task_tool = ToolSpec(
-    function=propose_polygon_fix,
-    description="Propose deterministic geometry edits with before/after coordinates to repair a measured violation.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "polygon_ids": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["task_id"],
-        "additionalProperties": False,
-    },
-)
-
-apply_polygon_fix = DrcTools.apply_polygon_fix
-apply_polygon_fix.task_tool = ToolSpec(
-    function=apply_polygon_fix,
-    description="Apply a staged repair proposal to the candidate layout transactionally.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "repair_id": {"type": "string"},
-        },
-        "required": ["repair_id"],
-        "additionalProperties": False,
-    },
-)
-
-recheck_violation = DrcTools.recheck_violation
-recheck_violation.task_tool = ToolSpec(
-    function=recheck_violation,
-    description="Evaluate supported local geometry on the saved candidate layout and bind evidence to candidate digest.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-        },
-        "required": ["task_id"],
-        "additionalProperties": False,
-    },
-)
-
-skip_plan_step = DrcTools.skip_plan_step
-skip_plan_step.task_tool = ToolSpec(
-    function=skip_plan_step,
-    description="Report that a conditional plan step (such as apply_polygon_fix or recheck_violation) was skipped for a task with a reason.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "tool": {"type": "string"},
-            "reason": {"type": "string"},
-        },
-        "required": ["task_id", "tool", "reason"],
-        "additionalProperties": False,
-    },
-)
-
-update_checklist = DrcTools.update_checklist
-update_checklist.task_tool = ToolSpec(
-    function=update_checklist,
-    description="Update an existing DRC checklist task status, work description, reason, polygon_ids, and evidence.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "pass", "skipped", "unresolved"]},
-            "work": {"type": "string"},
-            "reason": {"type": "string"},
-            "polygon_ids": {"type": "array", "items": {"type": "string"}},
-            "evidence": {"type": "array", "items": {"type": "object"}},
-        },
-        "required": ["task_id", "status", "reason"],
-        "additionalProperties": False,
-    },
-)
-
-query_layout_region = DrcTools.query_layout_region
-query_layout_region.task_tool = ToolSpec(
-    function=query_layout_region,
-    description="Query candidate GDS geometry in a user-unit bounding box [min_x, min_y, max_x, max_y] to expand evidence for the current task.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "cell_name": {"type": "string", "minLength": 1},
-            "bounds_user": {
-                "type": "array",
-                "items": {"type": "number"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-            "layers": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "layer": {"type": "integer"},
-                        "datatype": {"type": "integer"},
-                    },
-                    "required": ["layer", "datatype"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["cell_name", "bounds_user"],
         "additionalProperties": False,
     },
 )

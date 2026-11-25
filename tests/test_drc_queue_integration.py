@@ -26,38 +26,87 @@ class ScriptedChatClient:
         self.calls = 0
         self.tool_names_seen = []
         self.payloads = []
-        self.edited_task1 = False
+        self.requests = []
+        self.task1_stage = 'init'
 
     def chat(self, messages, specs, response_schema):
         self.calls += 1
+        self.requests.append((messages, specs, response_schema))
         self.tool_names_seen.append([spec['function']['name'] for spec in specs])
         last_msg = messages[-1]
-        if last_msg['role'] == 'user':
-            payload = json.loads(last_msg['content'])
-            self.payloads.append(payload)
-            tid = payload['task_id']
-            if tid == 'task-1' and not self.edited_task1:
-                self.edited_task1 = True
-                layout_ctx = payload['layout']
-                poly_id = layout_ctx['polygons'][0]['id']
+        prev_tool = messages[-1] if messages and messages[-1].get('role') == 'tool' else None
+        if prev_tool is not None:
+            tool_out = json.loads(prev_tool['content'])
+            if self.task1_stage == 'proposed' and tool_out.get('proposals'):
+                self.task1_stage = 'applied'
+                pid = tool_out['proposals'][0]['proposal_id']
                 return {
                     'role': 'assistant',
                     'content': None,
                     'tool_calls': [{
-                        'id': 'call-edit-1',
+                        'id': 'call-app-1',
                         'type': 'function',
                         'function': {
-                            'name': 'replace_polygon',
+                            'name': 'fix_cover',
                             'arguments': json.dumps({
-                                'cell_name': payload['cell'],
-                                'polygon_id': poly_id,
-                                'points': [[0.0, 0.0], [0.3, 0.0], [0.3, 0.1], [0.0, 0.1]],
+                                'task_id': 'task-1',
+                                'action': 'apply',
+                                'proposal_id': pid,
+                            }),
+                        },
+                    }],
+                }
+            if self.task1_stage == 'applied' and tool_out.get('status') == 'applied':
+                self.task1_stage = 'checked'
+                return {
+                    'role': 'assistant',
+                    'content': None,
+                    'tool_calls': [{
+                        'id': 'call-chk-1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'check_cover',
+                            'arguments': json.dumps({'task_id': 'task-1'}),
+                        },
+                    }],
+                }
+            return {
+                'role': 'assistant',
+                'content': json.dumps({
+                    'decision': 'completed',
+                    'status': 'incomplete',
+                    'reason': 'Updated polygon for task-1',
+                    'violations_analysis': [],
+                    'recommendations': 'Run DRC deck validation',
+                }),
+            }
+        if last_msg['role'] == 'user':
+            payload = json.loads(last_msg['content'])
+            self.payloads.append(payload)
+            tid = payload['task_id']
+            if tid == 'task-1' and self.task1_stage == 'init':
+                self.task1_stage = 'proposed'
+                layout_ctx = payload['layout']
+                m1_id = next(p['id'] for p in layout_ctx['polygons'] if p['lpp'][0] == 61)
+                ct_id = next(p['id'] for p in layout_ctx['polygons'] if p['lpp'][0] == 15)
+                return {
+                    'role': 'assistant',
+                    'content': None,
+                    'tool_calls': [{
+                        'id': 'call-prop-1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'fix_cover',
+                            'arguments': json.dumps({
+                                'task_id': 'task-1',
+                                'action': 'propose',
+                                'inner_id': ct_id,
+                                'groups': [[m1_id]],
                             }),
                         },
                     }],
                 }
             if tid == 'task-2':
-                layout_ctx = payload['layout']
                 return {
                     'role': 'assistant',
                     'content': None,
@@ -65,11 +114,12 @@ class ScriptedChatClient:
                         'id': 'call-fail-2',
                         'type': 'function',
                         'function': {
-                            'name': 'replace_polygon',
+                            'name': 'fix_cover',
                             'arguments': json.dumps({
-                                'cell_name': payload['cell'],
-                                'polygon_id': 'NONEXISTENT:poly:999',
-                                'points': [[0.0, 0.0], [0.1, 0.0], [0.1, 0.1], [0.0, 0.1]],
+                                'task_id': 'task-2',
+                                'action': 'propose',
+                                'inner_id': 'NONEXISTENT:poly:999',
+                                'groups': [['NONEXISTENT:poly:998']],
                             }),
                         },
                     }],
@@ -116,10 +166,10 @@ def create_sample_inputs(tmp_path: Path, cell_name: str = 'TEST_CELL') -> tuple[
     drc_path.write_text(drc_text, encoding='utf-8')
 
     layermap_path = tmp_path / 'test.layermap'
-    layermap_path.write_text('61 0 M1 drawing\n', encoding='utf-8')
+    layermap_path.write_text('M1 drawing 61 0\nCT drawing 15 0\n', encoding='utf-8')
 
     deck_path = tmp_path / 'rules.drc'
-    deck_path.write_text('CT_EN {\n  @ M1 enclosure of CT >= 0.025um\n}\n', encoding='utf-8')
+    deck_path.write_text('CT_EN {\n  @ M1 enclosure of CT >= 0.025um\n  ENC CT M1 < 0.025\n}\n', encoding='utf-8')
     return gds_path, drc_path, layermap_path, deck_path
 
 
@@ -174,7 +224,7 @@ def test_drc_marker_queue_end_to_end_and_artifacts(tmp_path: Path, monkeypatch) 
     out_lib = gdstk.read_gds(str(candidate_path))
     out_polys = out_lib['TEST_CELL'].polygons
     assert len(out_polys) == 2
-    assert any(max(float(pt[0]) for pt in poly.points) == 0.3 for poly in out_polys)
+    assert any(min(float(pt[0]) for pt in poly.points) < 0.0 for poly in out_polys)
 
     # 4. Persisted checklist.json is valid for checkpoint restoration
     checklist_path = rundir / 'checklist.json'
@@ -184,10 +234,27 @@ def test_drc_marker_queue_end_to_end_and_artifacts(tmp_path: Path, monkeypatch) 
     # 5. conversation.json and SQLite checkpoint exist and contain expected records
     conv_data = json.loads((rundir / 'conversation.json').read_text(encoding='utf-8'))
     assert conv_data['version'] == 2
+    requests = [event for event in conv_data['events'] if event['type'] == 'model_request']
+    assert len(requests) == len(scripted.requests)
+    for event, (messages, specs, schema) in zip(requests, scripted.requests, strict=True):
+        assert event['messages'] == messages
+        assert event['tools'] == specs
+        assert event['response_schema'] == schema
+        assert [message['role'] for message in messages[:2]] == ['system', 'user']
+        payload = json.loads(messages[1]['content'])
+        if payload['task_id'] == 'task-2':
+            assert not any(
+                call['id'].endswith('-1')
+                for message in messages[2:] for call in message.get('tool_calls', [])
+            )
+        assert {
+            call['id'] for message in messages[2:] for call in message.get('tool_calls', [])
+        } == {message['tool_call_id'] for message in messages[2:] if message['role'] == 'tool'}
+
     assert any(
         ev.get('type') == 'operation_start'
         and ev.get('name') == 'tool_call'
-        and ev.get('inputs', {}).get('name') == 'replace_polygon'
+        and ev.get('inputs', {}).get('name') == 'fix_cover'
         for ev in conv_data['events']
     )
 
@@ -206,7 +273,7 @@ def test_drc_marker_queue_end_to_end_and_artifacts(tmp_path: Path, monkeypatch) 
     task2_payload = next(p for p in scripted.payloads if p['task_id'] == 'task-2')
     assert task2_payload['task_history'] == []
     assert task2_payload['layout']['candidate_digest'] == result['candidate_digest']
-    assert any(max(pt[0] for pt in p['points']) == 0.3 for p in task2_payload['layout']['polygons'])
+    assert any(min(pt[0] for pt in p['points']) < 0.0 for p in task2_payload['layout']['polygons'])
 
 
 def test_checkpoint_resume_binds_live_candidate_digest_and_geometry(tmp_path: Path, monkeypatch) -> None:
@@ -253,11 +320,11 @@ def test_checkpoint_resume_binds_live_candidate_digest_and_geometry(tmp_path: Pa
     }
     resumed_ctx = GraphNodes(services2).build_active_task_context(state_snapshot, 'task-2')
     assert resumed_ctx['layout']['candidate_digest'] == saved_digest
-    assert any(max(pt[0] for pt in p['points']) == 0.3 for p in resumed_ctx['layout']['polygons'])
+    assert any(min(pt[0] for pt in p['points']) < 0.0 for p in resumed_ctx['layout']['polygons'])
 
 
 def test_failed_candidate_write_rolls_back_and_never_exposes_stale_digest(tmp_path: Path, monkeypatch) -> None:
-    """When checkpoint_candidate fails, replace_polygon rolls back and clears candidate_digest."""
+    """When checkpoint_candidate fails, fix_cover rolls back and preserves candidate_digest."""
     gds_path, drc_path, layermap_path, deck_path = create_sample_inputs(tmp_path, 'TEST_CELL')
     rundir = tmp_path / 'rundir'
     InputLoader(

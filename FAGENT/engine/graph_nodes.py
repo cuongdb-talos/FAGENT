@@ -604,11 +604,30 @@ class GraphNodes:
                 schema = getattr(step, 'schema', None) or self.services.workflow.response_schema
                 jsonschema.Draft202012Validator(schema).validate(response)
                 if queue_mode:
-                    item_status = 'unresolved' if (response.get('decision') == 'stop' or response.get('status') == 'incomplete' and response.get('decision') != 'completed') else 'pass'
+                    current_id = state['current_task_id']
+                    requires_check = context.task == 'drc' and (
+                        'check_cover' in step.tools or 'check_area' in step.tools
+                    )
+                    agent_stopped = response.get('decision') == 'stop' or (
+                        response.get('status') == 'incomplete' and response.get('decision') != 'completed'
+                    )
+                    if requires_check:
+                        check_rec = (state.get('task_checks') or {}).get(current_id) or {}
+                        verified_pass = (
+                            check_rec.get('status') == 'pass'
+                            and check_rec.get('candidate_digest') == state.get('candidate_digest')
+                        )
+                        item_status = 'pass' if (verified_pass and not agent_stopped) else 'unresolved'
+                        item_reason = response.get('reason', '') if (item_status == 'pass' or agent_stopped) else (
+                            response.get('reason') or 'Unverified completion: missing passing local check tied to current candidate'
+                        )
+                    else:
+                        item_status = 'unresolved' if agent_stopped else 'pass'
+                        item_reason = response.get('reason', '')
                     adv = self.advance_queue_item(
                         state,
                         item_status,
-                        response.get('reason', ''),
+                        item_reason,
                         response=response,
                         message_count=len(messages) + 1,
                     )
@@ -1096,7 +1115,8 @@ class GraphNodes:
         elif state.get('pending_tools'):
             destination = f'{step.id}--tools'
         elif step.action not in ('agent', 'review') and state.get('task_queue') is not None and len(state['task_queue']) == 0:
-            destination = 'END'
+            has_save = any(getattr(s, 'id', None) == 'save' for s in (getattr(self.services.workflow, 'steps', None) or ()))
+            destination = self.node_name('save') if (has_save and step.id != 'save') else 'END'
         elif step.action == 'agent' and state.get('response') is None:
             destination = self.node_name(step.id)
         elif step.action == 'review':

@@ -4,12 +4,14 @@
 from datetime import datetime
 import json
 from pathlib import Path
+import sys
 
 from FAGENT.capabilities.layout.input_loader import InputLoader
 from FAGENT.engine.conversation_trace import ConversationTrace
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.tasks.drc.checklist import Checklist
 from FAGENT.tasks.drc.rule_evidence import RuleEvidence
+from FAGENT.tasks.drc.tools import DrcTools
 
 
 # === SECTION 2: Steps ===
@@ -87,6 +89,18 @@ class Steps:
         drc_context['candidate_digest'] = context.state.get('candidate_digest')
         inspected = list(dict.fromkeys([*(context.state.get('inspected') or []), target_cell]))
         return {'drc_context': drc_context, 'inspected': inspected}
+
+    def save_gds(self, context):
+        """Save final candidate GDS once after queue completion, preserving original GDS on error."""
+        if context.state.get('save_completed'):
+            return {}
+        try:
+            res = DrcTools.save_gds(context)
+            return dict(res.updates or {})
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            reason = f'save_gds failed: {exc}'
+            print(f'[ERROR] {reason}', file=sys.stderr)
+            return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
 
     def validate_drc(self, context):
         candidate = context.state.get('candidate_path')
@@ -176,5 +190,6 @@ class Steps:
 _steps = Steps()
 read_drc = _steps.read_drc
 read_gds = _steps.read_gds
+save_gds = _steps.save_gds
 validate_drc = _steps.validate_drc
 prepare = _steps.prepare

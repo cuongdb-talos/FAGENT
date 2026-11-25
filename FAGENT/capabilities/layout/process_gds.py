@@ -11,6 +11,8 @@ import struct
 
 import numpy
 
+from .layer_map import LayerMap
+
 
 # ==============================================================================
 # SECTION 2: GDSII Binary Stream Parser and Geometry Processor Class
@@ -118,7 +120,7 @@ class ProcessGDS:
                 elif record[0] == 0x11:
                     if ele_type == "poly":
                         if (layer, data_type) in self.layer_mapping:
-                            if self.layer_mapping[(layer, data_type)][0] == "BOUNDARY":
+                            if self.layer_mapping[(layer, data_type)][0] in {"BORDER", "BOUNDARY"}:
                                 list_x = sorted([coord[i] for i in range(0, len(coord), 2)])
                                 list_y = sorted([coord[i] for i in range(1, len(coord), 2)])
                                 min_x = list_x[0]
@@ -438,13 +440,9 @@ class ProcessGDS:
         self.layer_mapping = {}
         if not self.layer_map_files:
             raise ValueError('At least one layer mapping file must be provided')
-        for path in self.layer_map_files:
-            with open(path, 'r') as stream:
-                for line in stream:
-                    if line.lstrip().startswith('#') or not line.strip():
-                        continue
-                    fields = line.split()
-                    self.layer_mapping[(int(fields[0]), int(fields[1]))] = [fields[2], fields[3]]
+        mapping = LayerMap().run(self.layer_map_files)
+        mapping.require_unambiguous()
+        self.layer_mapping = mapping.by_pair
 
     # --- Geometric transforms: mirror and rotate polygon coordinates around an origin ---
     def flip_poly(self, poly, coord):

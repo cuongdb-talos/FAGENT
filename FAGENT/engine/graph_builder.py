@@ -33,6 +33,8 @@ class GraphBuilder:
             routes = [END]
             if step.next != 'END':
                 routes.append(nodes.node_name(step.next))
+            if any(getattr(s, 'id', None) == 'save' for s in steps) and step.id != 'save':
+                routes.append(nodes.node_name('save'))
             if step.action == 'review':
                 routes.extend((node, nodes.node_name(step.continue_to)))
             if step.action == 'agent':

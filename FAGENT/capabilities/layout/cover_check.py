@@ -6,7 +6,7 @@
 import math
 
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, unary_union
 
 
 # ==============================================================================
@@ -18,9 +18,9 @@ class CoverCheck:
     # --------------------------------------------------------------------------
     # Main Execution Entry Point
     # --------------------------------------------------------------------------
-    def run(self, inner=None, outer=None, minimum: float = 0.0, precision: float = 1e-3) -> dict:
-        """Evaluate whether outer encloses inner by at least minimum in GDS user units."""
-        self.result = self._evaluate(inner, outer, minimum, precision)
+    def run(self, inner=None, outer=None, minimum: float = 0.0, precision: float = 1e-3, groups=None) -> dict:
+        """Evaluate whether outer or every outer group encloses inner by at least minimum in GDS user units."""
+        self.result = self._evaluate(inner, outer, minimum, precision, groups=groups)
         return self.result
 
     # --------------------------------------------------------------------------
@@ -33,8 +33,8 @@ class CoverCheck:
     # --------------------------------------------------------------------------
     # Core Evaluation Pipeline
     # --------------------------------------------------------------------------
-    def _evaluate(self, inner, outer, minimum, precision) -> dict:
-        """Validate inputs, check coverage, and collect all violating boundary segments."""
+    def _evaluate(self, inner, outer, minimum, precision, groups=None) -> dict:
+        """Validate inputs, check coverage across outer or groups, and collect violations."""
         if not self._is_valid_number(minimum) or float(minimum) < 0.0:
             return self._unknown(minimum, 'minimum enclosure must be a finite non-negative number')
         if not self._is_valid_number(precision) or float(precision) <= 0.0:
@@ -47,24 +47,82 @@ class CoverCheck:
         inner_poly, err_in = self._to_polygon(inner, 'inner')
         if err_in:
             return self._unknown(min_req, err_in)
+        if inner_poly.area <= tol * tol:
+            return self._unknown(min_req, 'Degenerate zero-area polygon geometry')
+
+        if groups is not None:
+            return self._evaluate_groups(inner_poly, groups, min_req, tol)
+
         outer_poly, err_out = self._to_polygon(outer, 'outer')
         if err_out:
             return self._unknown(min_req, err_out)
-
-        if inner_poly.area <= tol * tol or outer_poly.area <= tol * tol:
+        if outer_poly.area <= tol * tol:
             return self._unknown(min_req, 'Degenerate zero-area polygon geometry')
-        if len(inner_poly.interiors) > 0 or len(outer_poly.interiors) > 0:
-            return self._unknown(min_req, 'Polygons with interior holes are unsupported')
+        return self._evaluate_pair(inner_poly, outer_poly, min_req, tol)
 
+    def _evaluate_groups(self, inner_poly, groups, min_req: float, tol: float) -> dict:
+        """Evaluate coverage where every group union must independently cover inner_poly."""
+        if not isinstance(groups, (list, tuple)) or len(groups) == 0:
+            return self._unknown(min_req, 'groups must be a non-empty list of polygon groups')
+
+        group_results = []
+        all_violations = []
+        for idx, group in enumerate(groups):
+            if not isinstance(group, (list, tuple)) or len(group) == 0:
+                return self._unknown(min_req, f'Group {idx} must contain at least one polygon')
+            polys = []
+            for member in group:
+                poly, err = self._to_polygon(member, f'group[{idx}]')
+                if err:
+                    return self._unknown(min_req, err)
+                if poly.area <= tol * tol:
+                    return self._unknown(min_req, f'Degenerate zero-area polygon in group {idx}')
+                polys.append(poly)
+            group_geom = unary_union(polys)
+            if group_geom.is_empty or not group_geom.is_valid or group_geom.area <= tol * tol:
+                return self._unknown(min_req, f'Invalid union geometry in group {idx}')
+            res = self._evaluate_pair(inner_poly, group_geom, min_req, tol)
+            res['group_index'] = idx
+            group_results.append(res)
+            if res['status'] == 'unknown':
+                return res
+            if res['status'] == 'fail':
+                for v in res.get('violations', []):
+                    all_violations.append({**v, 'group_index': idx})
+
+        if all_violations:
+            return {
+                'status': 'fail',
+                'minimum': min_req,
+                'measured_distance': None,
+                'units': 'gds_user_units',
+                'violations': all_violations,
+                'group_results': group_results,
+                'reason': 'One or more groups failed required enclosure',
+            }
+
+        distances = [r['measured_distance'] for r in group_results if r.get('measured_distance') is not None]
+        return {
+            'status': 'pass',
+            'minimum': min_req,
+            'measured_distance': min(distances) if distances else 0.0,
+            'units': 'gds_user_units',
+            'violations': [],
+            'group_results': group_results,
+            'reason': 'All groups satisfy full enclosure and minimum distance',
+        }
+
+    def _evaluate_pair(self, inner_poly, outer_geom, min_req: float, tol: float) -> dict:
+        """Evaluate coverage and boundary-to-boundary enclosure between inner_poly and outer_geom."""
         inner_boundary = inner_poly.boundary
-        outer_boundary = outer_poly.boundary
+        outer_boundary = outer_geom.boundary
         outer_edges = self._extract_segments(outer_boundary, tol)
         if not outer_edges:
             return self._unknown(min_req, 'Outer polygon has no valid boundary segments')
 
         covered = (
-            inner_poly.difference(outer_poly).area <= tol * tol
-            and inner_poly.difference(outer_poly.buffer(tol)).is_empty
+            inner_poly.difference(outer_geom).area <= tol * tol
+            and inner_poly.difference(outer_geom.buffer(tol)).is_empty
         )
 
         if covered:
@@ -82,14 +140,21 @@ class CoverCheck:
             measured = None
 
         violations = []
-        outside_geom = inner_boundary.difference(outer_poly.buffer(tol))
+        outside_geom = inner_boundary.difference(outer_geom.buffer(tol))
         for seg_coords in self._extract_segments(outside_geom, tol):
             violations.append(
                 self._outside_violation(seg_coords, outer_boundary, outer_edges, min_req, tol)
             )
 
+        if not covered and not violations:
+            uncovered_geom = inner_poly.difference(outer_geom)
+            for seg_coords in self._extract_segments(uncovered_geom.boundary, tol):
+                violations.append(
+                    self._outside_violation(seg_coords, outer_boundary, outer_edges, min_req, tol)
+                )
+
         if min_req > tol:
-            inside_geom = inner_boundary.intersection(outer_poly.buffer(tol))
+            inside_geom = inner_boundary.intersection(outer_geom.buffer(tol))
             insufficient_zone = outer_boundary.buffer(min_req - tol)
             violating_inside = inside_geom.intersection(insufficient_zone)
             for seg_coords in self._extract_segments(violating_inside, tol):
@@ -235,4 +300,93 @@ class CoverCheck:
                 'inner_point': [float(inner_pt.x), float(inner_pt.y)],
                 'outer_point': [float(outer_pt.x), float(outer_pt.y)],
             },
+        }
+
+
+# ==============================================================================
+# SECTION 3: Geometric Area Checker Class
+# ==============================================================================
+class AreaCheck:
+    """Evaluates polygon area against a minimum area limit in GDS user units."""
+
+    # --------------------------------------------------------------------------
+    # Main Execution Entry Point
+    # --------------------------------------------------------------------------
+    def run(self, polygon=None, minimum_area: float = 0.0, precision: float = 1e-3) -> dict:
+        """Evaluate whether polygon area meets minimum_area in squared GDS user units."""
+        self.result = self._evaluate(polygon, minimum_area, precision)
+        return self.result
+
+    # --------------------------------------------------------------------------
+    # Initialization
+    # --------------------------------------------------------------------------
+    def __init__(self):
+        """Initialize the area checker."""
+        self.result = None
+
+    # --------------------------------------------------------------------------
+    # Core Evaluation Pipeline
+    # --------------------------------------------------------------------------
+    def _evaluate(self, polygon, minimum_area, precision) -> dict:
+        """Validate polygon and minimum_area, then measure area."""
+        checker = CoverCheck()
+        if not checker._is_valid_number(minimum_area) or float(minimum_area) <= 0.0:
+            return {
+                'status': 'unknown',
+                'minimum_area': None,
+                'measured_area': None,
+                'deficit_area': None,
+                'units': 'gds_user_units_sq',
+                'reason': 'minimum_area must be a finite positive number',
+            }
+        if not checker._is_valid_number(precision) or float(precision) <= 0.0:
+            return {
+                'status': 'unknown',
+                'minimum_area': float(minimum_area),
+                'measured_area': None,
+                'deficit_area': None,
+                'units': 'gds_user_units_sq',
+                'reason': 'GDS precision must be a positive finite number',
+            }
+
+        min_area = float(minimum_area)
+        tol = 0.5 * float(precision)
+        poly, err = checker._to_polygon(polygon, 'polygon')
+        if err:
+            return {
+                'status': 'unknown',
+                'minimum_area': min_area,
+                'measured_area': None,
+                'deficit_area': None,
+                'units': 'gds_user_units_sq',
+                'reason': err,
+            }
+        if poly.area <= tol * tol:
+            return {
+                'status': 'unknown',
+                'minimum_area': min_area,
+                'measured_area': float(poly.area),
+                'deficit_area': None,
+                'units': 'gds_user_units_sq',
+                'reason': 'Degenerate zero-area polygon geometry',
+            }
+
+        measured = float(poly.area)
+        deficit = max(0.0, min_area - measured)
+        if measured + 1e-12 >= min_area:
+            return {
+                'status': 'pass',
+                'minimum_area': min_area,
+                'measured_area': measured,
+                'deficit_area': 0.0,
+                'units': 'gds_user_units_sq',
+                'reason': 'Polygon area satisfies minimum area',
+            }
+        return {
+            'status': 'fail',
+            'minimum_area': min_area,
+            'measured_area': measured,
+            'deficit_area': deficit,
+            'units': 'gds_user_units_sq',
+            'reason': 'Polygon area is below minimum area',
         }

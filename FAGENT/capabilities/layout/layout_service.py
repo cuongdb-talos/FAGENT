@@ -6,6 +6,7 @@
 import json
 import math
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import gdstk
 
@@ -44,6 +45,7 @@ class LayoutService:
         self.dirty = False
         self.last_validation = None
         self.drc_log = None
+        self._last_replace = None
         return self
 
     # --------------------------------------------------------------------------
@@ -62,6 +64,7 @@ class LayoutService:
         self.dirty = False
         self.last_validation = None
         self.drc_log = None
+        self._last_replace = None
 
     # --------------------------------------------------------------------------
     # Allowed Capabilities Configuration
@@ -118,6 +121,7 @@ class LayoutService:
         cell.remove(old)
         cell.add(new)
         self.polygon_ids.rebind(cell_name, polygon_id, old, new)
+        self._last_replace = (cell_name, polygon_id, old, new)
         self.dirty = True
         self.last_validation = None
         return {
@@ -126,9 +130,15 @@ class LayoutService:
             'polygon_id': polygon_id,
             'layer': old.layer,
             'datatype': old.datatype,
-            'old_polygon': old,
-            'new_polygon': new,
         }
+
+    def rollback_last_replace(self):
+        """Rollback the most recent in-memory polygon replacement if present."""
+        if self._last_replace is None:
+            return
+        cell_name, polygon_id, old_polygon, new_polygon = self._last_replace
+        self.rollback_replace(cell_name, polygon_id, old_polygon, new_polygon)
+        self._last_replace = None
 
     def rollback_replace(self, cell_name, polygon_id, old_polygon, new_polygon):
         """Rollback in-memory polygon replacement and restore original polygon ID binding."""
@@ -136,6 +146,37 @@ class LayoutService:
         cell.remove(new_polygon)
         cell.add(old_polygon)
         self.polygon_ids.rebind(cell_name, polygon_id, new_polygon, old_polygon)
+        self._last_replace = None
+
+    def apply_polygon_changes(self, cell_name: str, changes: list[dict]) -> dict:
+        """Atomically apply a batch of polygon replacements in memory, rolling back on error."""
+        if not isinstance(changes, list) or not changes:
+            raise ValueError('changes must be a non-empty list')
+        snapshot = {
+            'cell_name': cell_name,
+            'applied': [],
+            'prev_dirty': self.dirty,
+            'prev_last_validation': self.last_validation,
+        }
+        try:
+            for change in changes:
+                pid = change['polygon_id']
+                pts = change['points']
+                self.replace_polygon(cell_name=cell_name, polygon_id=pid, points=pts)
+                snapshot['applied'].append(self._last_replace)
+        except Exception:
+            self.rollback_transaction(snapshot)
+            raise
+        return snapshot
+
+    def rollback_transaction(self, snapshot: dict) -> None:
+        """Rollback all polygon replacements recorded in snapshot."""
+        if not isinstance(snapshot, dict):
+            return
+        for cell_name, polygon_id, old_polygon, new_polygon in reversed(snapshot.get('applied', [])):
+            self.rollback_replace(cell_name, polygon_id, old_polygon, new_polygon)
+        self.dirty = snapshot.get('prev_dirty', False)
+        self.last_validation = snapshot.get('prev_last_validation')
 
     def _get_polygon(self, cell_name, polygon_id):
         old = self.polygon_ids.resolve(cell_name, polygon_id)
@@ -175,7 +216,14 @@ class LayoutService:
         self.check_output_path(self.candidate)
         self.rundir.mkdir(parents=True, exist_ok=True)
         self.load_library()
-        self.library.write_gds(str(self.candidate))
+        tmp = NamedTemporaryFile(dir=self.rundir, suffix='.gds', delete=False)
+        tmp_path = Path(tmp.name)
+        tmp.close()
+        try:
+            self.library.write_gds(str(tmp_path))
+            tmp_path.replace(self.candidate)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         if getattr(self, 'verbose', True):
             print(f"    [Candidate] Candidate layout saved to {self.candidate}")
         return {'candidate': str(self.candidate), 'validated': False}
