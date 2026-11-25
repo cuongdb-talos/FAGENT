@@ -516,7 +516,7 @@ class GraphNodes:
             task_context.append(item)
         return task_context
 
-    def advance_queue_item(self, state, status: str, reason: str, response=None) -> dict:
+    def advance_queue_item(self, state, status: str, reason: str, response=None, message_count: int | None = None) -> dict:
         """Record terminal item outcome, pop current_task_id once, reset iteration, and advance."""
         current_id = state.get('current_task_id')
         queue = list(state.get('task_queue') or [])
@@ -554,10 +554,12 @@ class GraphNodes:
             })
 
         next_id = queue[0] if queue else None
+        msg_start = len(state.get('messages') or []) if message_count is None else int(message_count)
         updates.update({
             'task_queue': queue,
             'current_task_id': next_id,
             'task_history': history,
+            'task_message_start': msg_start,
             'iteration': 0,
             'pending_tools': False,
             'response': None if next_id else (response or {'decision': 'completed', 'status': 'incomplete', 'reason': final_reason}),
@@ -584,33 +586,10 @@ class GraphNodes:
             print(f'[ERROR] {reason}', file=sys.stderr)
             return {'failed': True, 'result': {'status': 'incomplete', 'reason': reason}}
         messages = list(state.get('messages', []))
-        request_messages = list(messages)
         node_prompt = self.services.node_prompt(step)
-        agent_payload = {}
-        if node_prompt:
-            agent_payload[f'{step.id}_instruction'] = node_prompt
-        if state.get('checklist') is not None:
-            goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
-            agent_payload['current_checklist'] = state['checklist']
-            agent_payload['goal'] = goal
-        if state.get('current_task_id') is not None:
-            agent_payload['current_task_id'] = state['current_task_id']
-            agent_payload['active_task'] = self.build_active_task_context(state, state['current_task_id'])
-            agent_payload['task_history'] = list(state.get('task_history') or [])
-        if state.get('plan') is not None:
-            agent_payload['plan'] = state['plan']
-        active_plan = self.active_plan(state.get('plan_history', []))
-        if active_plan is not None:
-            agent_payload['plan_progress'] = active_plan
+        request_messages, _agent_payload = self.build_model_request(state, node_prompt=node_prompt, step_id=step.id, task_name=context.task)
         report = state.get('report') or {}
         target_cell = report.get('top_cell') if context.task == 'drc' else None
-        if target_cell:
-            agent_payload['target_cell'] = target_cell
-        if agent_payload:
-            request_messages.append({
-                'role': 'user',
-                'content': json.dumps(agent_payload),
-            })
         try:
             message = self.services.chat(
                 request_messages,
@@ -626,7 +605,13 @@ class GraphNodes:
                 jsonschema.Draft202012Validator(schema).validate(response)
                 if queue_mode:
                     item_status = 'unresolved' if (response.get('decision') == 'stop' or response.get('status') == 'incomplete' and response.get('decision') != 'completed') else 'pass'
-                    adv = self.advance_queue_item(state, item_status, response.get('reason', ''), response=response)
+                    adv = self.advance_queue_item(
+                        state,
+                        item_status,
+                        response.get('reason', ''),
+                        response=response,
+                        message_count=len(messages) + 1,
+                    )
                     return {**updates, **adv}
                 if state.get('checklist') is not None and response.get('decision') == 'completed':
                     summary = Checklist.from_dict(state['checklist']).summary()
@@ -667,6 +652,90 @@ class GraphNodes:
         read_gds['function']['parameters']['properties']['cell_name']['enum'] = names
         specs['read_gds'] = read_gds
         return list(specs.values())
+
+    def build_model_request(
+        self,
+        state: dict,
+        node_prompt: str = '',
+        step_id: str = 'repair',
+        task_name: str = 'drc',
+    ) -> tuple[list[dict], dict]:
+        """Build model-facing messages and compact payload without mutating stored state history."""
+        messages = list(state.get('messages') or [])
+        queue_mode = state.get('task_queue') is not None and state.get('current_task_id') is not None
+
+        agent_payload = {}
+        if node_prompt:
+            agent_payload[f'{step_id}_instruction'] = node_prompt
+
+        drc_context = state.get('drc_context') or {}
+        goal = drc_context.get('goal', self.services.config.get('goal', ''))
+        constraints = (drc_context.get('knowledge') or {}).get('constraints', [])
+
+        if queue_mode:
+            agent_payload['goal'] = goal
+            agent_payload['constraints'] = list(constraints)
+            agent_payload['current_task_id'] = state['current_task_id']
+            agent_payload['active_task'] = self.build_active_task_context(state, state['current_task_id'])
+            agent_payload['task_history'] = list(state.get('task_history') or [])
+            request_messages = self._select_task_messages(messages, state.get('task_message_start', 0))
+        else:
+            if state.get('checklist') is not None:
+                agent_payload['current_checklist'] = state['checklist']
+                agent_payload['goal'] = goal
+            if state.get('current_task_id') is not None:
+                agent_payload['current_task_id'] = state['current_task_id']
+                agent_payload['active_task'] = self.build_active_task_context(state, state['current_task_id'])
+                agent_payload['task_history'] = list(state.get('task_history') or [])
+            request_messages = list(messages)
+
+        if state.get('plan') is not None:
+            agent_payload['plan'] = state['plan']
+        active_plan = self.active_plan(state.get('plan_history', []))
+        if active_plan is not None:
+            agent_payload['plan_progress'] = active_plan
+        report = state.get('report') or {}
+        target_cell = report.get('top_cell') if task_name == 'drc' else None
+        if target_cell:
+            agent_payload['target_cell'] = target_cell
+        if agent_payload:
+            request_messages.append({
+                'role': 'user',
+                'content': json.dumps(agent_payload),
+            })
+        return request_messages, agent_payload
+
+    def _select_task_messages(self, messages: list[dict], task_message_start: int) -> list[dict]:
+        """Keep shared system instructions and paired assistant/tool messages for the current item."""
+        system_msgs = [m for m in messages if m.get('role') == 'system']
+        start_idx = max(0, int(task_message_start or 0))
+        item_msgs = [m for m in messages[start_idx:] if m.get('role') != 'system']
+
+        available_tool_ids = {
+            m.get('tool_call_id')
+            for m in item_msgs
+            if m.get('role') == 'tool' and m.get('tool_call_id')
+        }
+        included_call_ids = set()
+        selected_item_msgs = []
+        for msg in item_msgs:
+            role = msg.get('role')
+            if role == 'assistant' and msg.get('tool_calls'):
+                call_ids = [
+                    call.get('id')
+                    for call in msg['tool_calls']
+                    if isinstance(call, dict) and call.get('id')
+                ]
+                if call_ids and all(cid in available_tool_ids for cid in call_ids):
+                    included_call_ids.update(call_ids)
+                    selected_item_msgs.append(msg)
+                continue
+            if role == 'tool':
+                if msg.get('tool_call_id') in included_call_ids:
+                    selected_item_msgs.append(msg)
+                continue
+            selected_item_msgs.append(msg)
+        return [*system_msgs, *selected_item_msgs]
 
     def build_active_task_context(self, state, task_id: str) -> dict:
         """Build per-marker context with DBU-converted coordinates, rule evidence, and bounded region geometry."""
@@ -915,7 +984,7 @@ class GraphNodes:
                         self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
                         messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
                         self.last_conversation = list(messages)
-                        adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error)
+                        adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error, message_count=len(messages))
                         return {**updates, **adv, 'messages': messages}
                     updates['tool_review'] = {
                         'tool': name, 'tool_call_id': call_id, 'arguments': arguments,
@@ -937,7 +1006,7 @@ class GraphNodes:
                     self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
                     messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
                     self.last_conversation = list(messages)
-                    adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error)
+                    adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error, message_count=len(messages))
                     return {**updates, **adv, 'messages': messages}
                 call_args = arguments if isinstance(arguments, dict) else {}
                 relevant_vids = [call_args['task_id']] if 'task_id' in call_args else []

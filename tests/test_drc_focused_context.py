@@ -267,3 +267,61 @@ def test_read_drc_retains_report_in_state_without_appending_full_report_message(
     assert updates['report'] == report
     assert updates['drc_context']['drc'] == report
     assert all('drc_context' not in (m.get('content') or '') for m in updates['messages'])
+
+
+def test_model_request_excludes_full_report_and_checklist_and_scopes_tool_history(tmp_path: Path):
+    """Model requests omit full report/checklist, keep current tool pairs, and preserve full state history."""
+    layout = make_gds_layout(tmp_path)
+    deck, lmap = write_deck_and_map(tmp_path)
+    report = make_report([[1000, 2000], [1100, 2100]])
+    services = FocusedContextServices(tmp_path, layout, report, decks=[deck], layer_maps=[lmap], margin_dbu=100.0)
+    services.config['constraints'] = ['Do not touch unrelated cells']
+    nodes = GraphNodes(services)
+
+    state_task2 = {
+        'report': report,
+        'drc_context': {'drc': report, 'goal': 'Fix DRC', 'knowledge': {'constraints': ['Keep M1 width >= 0.05']}},
+        'checklist': {
+            'tasks': [
+                {'task_id': 'task-1', 'rule': 'CT_EN_7a', 'violation_id': 'v1', 'occurrence': 0, 'status': 'unresolved'},
+                {'task_id': 'task-2', 'rule': 'OTHER_RULE', 'violation_id': 'v2', 'occurrence': 0, 'status': 'pending'},
+            ]
+        },
+        'task_queue': ['task-2'],
+        'current_task_id': 'task-2',
+        'task_history': [
+            {'sequence': 1, 'task_id': 'task-1', 'status': 'unresolved', 'reason': 'Interrupted tool call'},
+        ],
+        'task_message_start': 3,
+        'messages': [
+            {'role': 'system', 'content': 'System instructions'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call-t1', 'type': 'function', 'function': {'name': 'replace_polygon', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'call-t1', 'content': '{"ok": false}'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call-t2-ok', 'type': 'function', 'function': {'name': 'check_cover', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'call-t2-ok', 'content': '{"ok": true}'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'call-t2-dangling', 'type': 'function', 'function': {'name': 'replace_polygon', 'arguments': '{}'}}]},
+        ],
+    }
+
+    req_msgs, payload = nodes.build_model_request(state_task2, node_prompt='Repair active marker.')
+
+    assert 'current_checklist' not in payload
+    assert 'report' not in payload
+    assert payload['goal'] == 'Fix DRC'
+    assert payload['constraints'] == ['Keep M1 width >= 0.05']
+    assert payload['task_history'] == [{'sequence': 1, 'task_id': 'task-1', 'status': 'unresolved', 'reason': 'Interrupted tool call'}]
+    assert payload['active_task']['task']['task_id'] == 'task-2'
+
+    # System message preserved, task-1 tool pair excluded, task-2 paired tool kept, dangling tool call excluded
+    assert req_msgs[0] == {'role': 'system', 'content': 'System instructions'}
+    tool_call_ids_sent = [
+        c['id']
+        for m in req_msgs
+        for c in (m.get('tool_calls') or [])
+    ]
+    tool_result_ids_sent = [m.get('tool_call_id') for m in req_msgs if m.get('role') == 'tool']
+    assert tool_call_ids_sent == ['call-t2-ok']
+    assert tool_result_ids_sent == ['call-t2-ok']
+
+    # Full prior messages remain untouched in state
+    assert len(state_task2['messages']) == 6

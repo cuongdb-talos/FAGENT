@@ -62,3 +62,4 @@ class FagentState(TypedDict, total=False):
     task_queue: list[str]
     current_task_id: str | None
     task_history: list[dict[str, Any]]
+    task_message_start: int
