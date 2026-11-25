@@ -7,3 +7,5 @@ tasks :
       gds_folder : "DRC"
       drc_files : "DRC/1P7M_6Ic_1TKMc_ALPA2.drc"
       prompt : "Fix all DRC errors about M1 and CT layer but ignore error about density."
+      skip_prompt : "bỏ qua lỗi density"
+      skip_distance_threshold : 0.5

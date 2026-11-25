@@ -23,7 +23,7 @@ class Checklist:
     # --------------------------------------------------------------------------
     # Main Execution Entry Point
     # --------------------------------------------------------------------------
-    def run(self, report: dict = None, proposed_tasks: list = None, goal: str = '', rule_evidence: dict | None = None) -> 'Checklist':
+    def run(self, report: dict = None, proposed_tasks: list = None, goal: str = '', rule_evidence: dict | None = None, *, selected_rules: set[str] | None = None) -> 'Checklist':
         """Reconcile report violations against proposed_tasks or build deterministic report items."""
         if report is None:
             raise ValueError('DRC report must be provided')
@@ -31,6 +31,8 @@ class Checklist:
             raise ValueError('proposed_tasks must be a list')
 
         expected_items = self._extract_report_items(report)
+        if selected_rules is not None:
+            expected_items = [item for item in expected_items if item['rule'] in selected_rules]
         if proposed_tasks is None:
             tasks = []
             for idx, item in enumerate(expected_items, start=1):
@@ -38,7 +40,7 @@ class Checklist:
                     status = 'unresolved'
                     reason = item.get('missing_reason', 'Missing geometry in report')
                     work = f'Investigate missing geometry for {item["rule"]}'
-                elif self._skip_allowed(item['rule'], '', goal, rule_evidence):
+                elif selected_rules is None and self._skip_allowed(item['rule'], '', goal, rule_evidence):
                     status = 'skipped'
                     evidence = (rule_evidence or {}).get(item['rule'], {})
                     if evidence.get('density') and self.excludes_density(goal):
@@ -258,6 +260,23 @@ class Checklist:
     # --------------------------------------------------------------------------
     # Report Reconciliation and Goal Skip Validation
     # --------------------------------------------------------------------------
+    def rule_summary(self, report: dict) -> list[dict]:
+        """List violated rules with report descriptions and counts for scope selection."""
+        if not isinstance(report, dict):
+            raise ValueError('DRC report must be a dict')
+        counts = {}
+        for item in self._extract_report_items(report):
+            rule = item['rule']
+            counts[rule] = counts.get(rule, 0) + 1
+        descriptions = {
+            str(rule.get('name', '')).strip(): rule.get('description')
+            for rule in report.get('rules') or []
+        }
+        return [
+            {'rule': rule, 'description': descriptions.get(rule), 'violation_count': count}
+            for rule, count in counts.items()
+        ]
+
     def _extract_report_items(self, report: dict) -> list:
         """Extract all geometry occurrences and count-mismatch placeholders from a DRC report."""
         items = []

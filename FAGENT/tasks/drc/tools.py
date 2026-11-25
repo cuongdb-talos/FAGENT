@@ -54,7 +54,7 @@ class DrcTools:
         if min_enc is None and rule_ev.get("required_enclosure_dbu") is not None:
             min_enc = float(rule_ev["required_enclosure_dbu"]) * resolved["grid"]
         if min_enc is None:
-            min_enc = 0.0
+            return ToolResult({"status": "unknown", "reason": "Missing minimum enclosure in rule evidence", "proposals": []}, {})
 
         if not inner_id or not isinstance(groups, list) or not groups or any(not g for g in groups):
             return ToolResult({"status": "unknown", "reason": "inner_id and non-empty groups are required", "proposals": []}, {})
@@ -62,17 +62,31 @@ class DrcTools:
         layout = resolved["layout"]
         cell_name = resolved["cell_name"]
         try:
-            inner_pts = layout.polygon_ids.resolve(cell_name, inner_id).points.tolist()
-            group_pts = [
-                [layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in grp]
-                for grp in groups
-            ]
+            inner = layout.polygon_ids.resolve(cell_name, inner_id)
+            cover_polygons = [[layout.polygon_ids.resolve(cell_name, pid) for pid in group] for group in groups]
         except (KeyError, ValueError, TypeError) as exc:
             return ToolResult({"status": "unknown", "reason": f"Unknown polygon_id: {exc}", "proposals": []}, {})
 
+        cover_groups = rule_ev.get("cover_groups")
+        if cover_groups is not None:
+            mapping = rule_ev["layer_mapping"]
+            inner_layer = mapping[rule_ev["target_layer"]]
+            allowed_groups = [
+                {(mapping[name]["layer"], mapping[name]["datatype"]) for name in group}
+                for group in cover_groups
+            ]
+            if (inner.layer, inner.datatype) != (inner_layer["layer"], inner_layer["datatype"]):
+                return ToolResult({"status": "unknown", "reason": "inner_id must belong to the rule target layer", "proposals": []}, {})
+            if len(cover_polygons) != len(allowed_groups) or any(
+                (poly.layer, poly.datatype) not in allowed
+                for group, allowed in zip(cover_polygons, allowed_groups)
+                for poly in group
+            ):
+                return ToolResult({"status": "unknown", "reason": "Polygon groups must match the rule cover_groups", "proposals": []}, {})
+
         built = CoverProposalBuilder().run(
-            inner_points=inner_pts,
-            groups=group_pts,
+            inner_points=inner.points.tolist(),
+            groups=[[poly.points.tolist() for poly in group] for group in cover_polygons],
             minimum_enclosure=float(min_enc),
             grid=resolved["grid"],
             inner_id=inner_id,
@@ -106,6 +120,8 @@ class DrcTools:
             return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
 
         rule_ev = resolved["rule_evidence"]
+        if rule_ev.get("rule_type") not in (None, "area"):
+            return ToolResult({"status": "unknown", "reason": "Rule evidence does not describe an area rule", "proposals": []}, {})
         min_area = minimum_area if minimum_area is not None else (
             rule_ev.get("minimum_area_user") if rule_ev.get("minimum_area_user") is not None else rule_ev.get("required_area_user")
         )
@@ -462,15 +478,16 @@ class DrcTools:
 fix_cover = DrcTools.fix_cover
 fix_cover.task_tool = ToolSpec(
     function=fix_cover,
-    description="Propose or apply a cover repair for a task using model-selected inner_id and polygon groups.",
+    description="Propose or apply a cover repair. For propose, use literal layout polygon IDs in inner_id and groups.",
     parameters={
         "type": "object",
         "properties": {
             "task_id": {"type": "string"},
             "action": {"type": "string", "enum": ["propose", "apply"]},
-            "inner_id": {"type": "string"},
+            "inner_id": {"type": "string", "description": "Editable inner polygon ID from layout.polygons[].id."},
             "groups": {
                 "type": "array",
+                "description": "Ordered groups of editable polygon IDs from layout.polygons[].id.",
                 "items": {"type": "array", "items": {"type": "string"}},
             },
             "proposal_id": {"type": "string"},

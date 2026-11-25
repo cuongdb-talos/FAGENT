@@ -204,8 +204,18 @@ class LlamaAdapter:
     def chat(self, messages, tools, response_schema):
         self.last_thinking = None
         schema = self.response_schema(tools, response_schema)
+        template_messages = deepcopy(messages)
+        for message in template_messages:
+            for call in message.get('tool_calls') or []:
+                function = call['function']
+                arguments = function['arguments']
+                if isinstance(arguments, str):
+                    arguments = json.loads(arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError('llama.cpp tool arguments must be a JSON object')
+                function['arguments'] = arguments
         response = self.load_model('agent').create_chat_completion(
-            messages=messages, response_format={'type': 'json_object', 'schema': schema})
+            messages=template_messages, response_format={'type': 'json_object', 'schema': schema})
         self.message = self.contract.normalize_response(response, schema)
         self.last_thinking = self.contract.last_thinking
         return self.message

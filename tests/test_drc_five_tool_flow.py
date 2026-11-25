@@ -152,10 +152,21 @@ class DeterministicFiveToolModel:
                 }
 
             if rule == "CT_R_11" and polys:
+                violation = payload["violation"]
+                assert violation["evidence"]["supported"] is True
+                assert violation["requirement"]["min_enclosure"] == 0
+                assert violation["cover_groups"] == [["M1"], ["GT", "AA"]]
+                assert violation["exception_layers"] == ["INST", "EXCLU"]
+                system = messages[0]["content"]
+                assert system.count("Minimize width") == 1
+                assert "read_gds" not in system and "replace_polygon" not in system
                 ct_poly = next((p for p in polys if p["lpp"][0] == 1), None)
                 m1_poly = next((p for p in polys if p["lpp"][0] == 2), None)
                 aa_poly = next((p for p in polys if p["lpp"][0] == 3), None)
                 if ct_poly and m1_poly and aa_poly:
+                    proposal = violation["fix_cover_candidates"]["propose_arguments"]
+                    assert proposal["inner_id"] == ct_poly["id"]
+                    assert proposal["groups"] == [[m1_poly["id"]], [aa_poly["id"]]]
                     self.stage_by_task[tid] = "cover_proposed"
                     return {
                         "role": "assistant",
@@ -165,12 +176,7 @@ class DeterministicFiveToolModel:
                             "type": "function",
                             "function": {
                                 "name": "fix_cover",
-                                "arguments": json.dumps({
-                                    "task_id": tid,
-                                    "action": "propose",
-                                    "inner_id": ct_poly["id"],
-                                    "groups": [[m1_poly["id"]], [aa_poly["id"]]],
-                                }),
+                                "arguments": json.dumps(proposal),
                             },
                         }],
                     }
@@ -198,13 +204,15 @@ class DeterministicFiveToolModel:
         }
 
 
-def build_drc_run_inputs(tmp_path: Path, rules_text: list[str], cell_name: str = "CELL0") -> tuple[Path, Path]:
+def build_drc_run_inputs(
+    tmp_path: Path, rules_text: list[str], cell_name: str = "CELL0", m1_right: float = 0.20
+) -> tuple[Path, Path]:
     """Create GDS, DRC results, layermap, and rule deck, then run InputLoader."""
     gds_path = tmp_path / f"{cell_name}.gds"
     lib = gdstk.Library(unit=1e-6, precision=1e-9)
     cell = lib.new_cell(cell_name)
     cell.add(gdstk.rectangle((0.10, 0.10), (0.20, 0.20), layer=1, datatype=0))  # CT
-    cell.add(gdstk.rectangle((0.10, 0.10), (0.20, 0.20), layer=2, datatype=0))  # M1
+    cell.add(gdstk.rectangle((0.10, 0.10), (m1_right, 0.20), layer=2, datatype=0))  # M1
     cell.add(gdstk.rectangle((0.10, 0.10), (0.20, 0.20), layer=3, datatype=0))  # AA
     cell.add(gdstk.rectangle((0.00, 0.00), (0.40, 0.06), layer=4, datatype=0))  # GT (area 0.024)
     lib.write_gds(str(gds_path))
@@ -213,11 +221,11 @@ def build_drc_run_inputs(tmp_path: Path, rules_text: list[str], cell_name: str =
     drc_path.write_text("\n".join([f"{cell_name} 1000", *rules_text, ""]), encoding="utf-8")
 
     layermap = tmp_path / "tech.layermap"
-    layermap.write_text("CT drawing 1 0\nM1 drawing 2 0\nAA drawing 3 0\nGT drawing 4 0\n", encoding="utf-8")
+    layermap.write_text("CT drawing 1 0\nM1 drawing 2 0\nAA drawing 3 0\nGT drawing 4 0\nINST drawing 5 0\nEXCLU drawing 6 0\n", encoding="utf-8")
 
     deck = tmp_path / "rules.drc"
     deck.write_text(
-        "CT_R_11 {\n  @ CT covered by M1 and (AA or GT)\n  CT NOT (M1 AND (GT OR AA))\n}\n"
+        "CT_R_11 {\n  @ CT covered by M1 and (AA or GT)\n  ((CT NOT (M1 AND (GT OR AA))) NOT INSIDE INST) NOT INSIDE EXCLU\n}\n"
         "GT_A_13 {\n  @ GT area >= 0.038um2\n  AREA GT < 0.038\n}\n"
         "M1_DEN {\n  @ M1 density\n  DENSITY M1 < 0.2\n}\n"
         "AMBIG_R {\n  @ Ambiguous rule\n  BAD_OP\n}\n",
@@ -233,14 +241,19 @@ def run_drc_workflow(rundir: Path, deck: Path, model: DeterministicFiveToolModel
     """Run the compiled DRC workflow with a deterministic model stub and no DRC backend."""
     workflow = WorkflowLoader(Path("FAGENT/tasks/drc/workflow.yaml")).run()
     config = {
-        "goal": "Fix DRC violations. Skip density.",
+        "goal": "Fix DRC violations.",
+        "skip_prompt": "Skip density",
         "drc_files": [str(deck)],
+        "system_prompt_file": "FAGENT/knowledge/templates/prompts/drc_site.md",
         "max_iterations": max_iterations,
         "rag_limit": 2,
         "rag_context_chars": 2000,
     }
     services = GraphServices(rundir, config, workflow, verbose=False)
     services.build_chat_client = lambda: model
+    services.embed_texts = lambda texts: [[1, 0]] + [
+        [1, 0] if "density" in text.lower() else [0, 1] for text in texts[1:]
+    ]
     services.rag = type("EmptyRag", (), {"retrieve": lambda self, q, r, l: []})()
     messages = services.prepare(resume=False)
     runner = GraphRunner(services, rundir)
@@ -277,7 +290,7 @@ def test_five_tool_workflow_exposes_only_five_tools_and_saves_once_with_unresolv
 
     tasks = result["checklist"]["tasks"]
     by_rule = {t["rule"]: t for t in tasks}
-    assert by_rule["M1_DEN"]["status"] == "skipped"
+    assert "M1_DEN" not in by_rule
     assert by_rule["GT_A_13"]["status"] == "pass"
     assert by_rule["AMBIG_R"]["status"] == "unresolved"
     assert result["status"] == "incomplete"
@@ -324,3 +337,21 @@ def test_empty_queue_routes_directly_to_save_once(tmp_path: Path) -> None:
     assert model.calls == 0
     assert (rundir / "candidate.gds").is_file()
     assert result["candidate_digest"] == GraphServices.candidate_digest(rundir / "candidate.gds")
+
+
+
+def test_boolean_cover_rule_repairs_ct_through_five_tool_flow(tmp_path: Path) -> None:
+    """The boolean rule reaches fix_cover, applies a proposal, and passes local verification."""
+    rundir, deck = build_drc_run_inputs(
+        tmp_path,
+        ["CT_R_11", "1 1 1 Nov 25 12:00:00 2026", "Cover", "p 1 4", "175 100", "200 100", "200 200", "175 200"],
+        m1_right=0.18,
+    )
+    result = run_drc_workflow(rundir, deck, DeterministicFiveToolModel())
+
+    task, = result["checklist"]["tasks"]
+    assert task["status"] == "pass"
+    assert result["validation"] is None
+    saved = gdstk.read_gds(str(rundir / "candidate.gds"))
+    m1, = [poly for poly in saved.cells[0].polygons if poly.layer == 2]
+    assert m1.bounding_box()[1][0] == 0.20

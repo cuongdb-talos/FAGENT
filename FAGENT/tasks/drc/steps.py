@@ -3,14 +3,15 @@
 # === SECTION 1: Imports ===
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 from FAGENT.capabilities.layout.input_loader import InputLoader
 from FAGENT.engine.conversation_trace import ConversationTrace
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.tasks.drc.checklist import Checklist
-from FAGENT.tasks.drc.rule_evidence import RuleEvidence
 from FAGENT.tasks.drc.tools import DrcTools
 
 
@@ -43,18 +44,11 @@ class Steps:
         else:
             updated_messages = [{'role': 'system', 'content': sys_content}, *current_messages]
 
-        # Initialize deterministic checklist from report
         report = context.services.drc_report
-        evidence = None
-        if isinstance(report, dict) and Checklist.excludes_density(goal):
-            sources = getattr(context.services, 'input_sources', None) or {}
-            decks = sources.get('decks') or context.services.config.get('drc_files', [])
-            if isinstance(decks, (str, Path)):
-                decks = [decks]
-            names = {str(rule.get('name', '')).strip() for rule in (report.get('rules') or [])}
-            names.update(report.get('violations_by_rule') or {})
-            evidence = RuleEvidence().density_evidence(names - {''}, decks)
-        checklist = Checklist().run(report=report, goal=goal, rule_evidence=evidence)
+        checklist = Checklist()
+        violations = checklist.rule_summary(report)
+        selected_rules = self._select_checklist_rules(context.services, violations)
+        checklist.run(report=report, selected_rules=selected_rules)
         snapshot = checklist.read()
         task_queue = checklist.queue_ids()
         result = {
@@ -70,6 +64,44 @@ class Steps:
         context.services.check_output_path(Path(result['checklist_path']))
         checklist.save(Path(result['checklist_path']))
         return result
+
+    def _select_checklist_rules(self, services, violations):
+        """Exclude violations close to the explicit skip query in embedding space."""
+        selected = {entry['rule'] for entry in violations}
+        query = services.config.get('skip_prompt', '')
+        threshold = services.config.get('skip_distance_threshold', 0.5)
+        if not isinstance(query, str):
+            raise ValueError('skip_prompt must be a string')
+        if type(threshold) not in (float, int) or not 0 <= threshold <= 2:
+            raise ValueError('skip_distance_threshold must be between 0 and 2')
+        if not selected or not query.strip():
+            return selected
+
+        texts = []
+        for entry in violations:
+            description = entry['description']
+            if isinstance(description, list):
+                description = '\n'.join(description)
+            texts.append((description or '').strip() or entry['rule'])
+
+        query_vector, *rule_vectors = services.embed_texts([query.strip(), *texts])
+        query_norm = math.hypot(*query_vector)
+        if not query_norm or len(rule_vectors) != len(violations):
+            raise ValueError('Invalid checklist embedding response')
+        distances = {}
+        for entry, vector in zip(violations, rule_vectors, strict=True):
+            norm = math.hypot(*vector)
+            if not norm or len(vector) != len(query_vector):
+                raise ValueError(f"Invalid embedding for rule {entry['rule']}")
+            cosine = sum((x / query_norm) * (y / norm) for x, y in zip(query_vector, vector, strict=True))
+            distances[entry['rule']] = 1 - max(-1.0, min(1.0, cosine))
+        selected = {rule for rule, distance in distances.items() if distance >= threshold}
+        trace = getattr(services, 'conversation_trace', None)
+        if trace:
+            op = trace.start_operation('checklist_embedding_filter', {'query': query, 'threshold': threshold})
+            trace.finish_operation(op, 'checklist_embedding_filter', status='completed',
+                                   outputs={'distances': distances, 'excluded_rules': sorted(distances.keys() - selected)})
+        return selected
 
     def read_gds(self, context):
         """Read target cell geometry in GDS user units and attach it to drc_context."""
@@ -140,6 +172,9 @@ class Steps:
             if not deck.is_file():
                 raise FileNotFoundError(f'Missing DRC rule deck: {deck}')
         config = {**config, 'drc_files': [str(path) for path in resolved_decks]}
+        for key in ('skip_prompt', 'skip_distance_threshold'):
+            if key in task_cfg:
+                config[key] = task_cfg[key]
         cells = (base / setup['list_cells']).read_text().splitlines()
         for line in cells:
             cell = line.strip()
@@ -151,40 +186,44 @@ class Steps:
             drc = drc_directory / f'{cell}.drc.results'
             resolved_maps = [(base / path).resolve() for path in maps]
             task_name = task_cfg.get('task_name') or task_cfg.get('task') or 'drc'
-            run_id, rundir = self.allocate_rundir(output, cell, task_name=task_name)
-            trace = ConversationTrace(rundir)
-            op_id = trace.start_operation(
-                'preparation',
-                {'cell': cell, 'gds': str(gds), 'drc': str(drc), 'layer_map': [str(path) for path in resolved_maps]},
-            )
-            try:
-                InputLoader(gds_path=gds, drc_path=drc, output_dir=rundir,
-                            layer_map_files=resolved_maps, verbose=verbose).run()
-                trace.finish_operation(
-                    op_id,
-                    'preparation',
-                    status='completed',
-                    outputs={'gds_json': str(rundir / 'gds.json'), 'drc_json': str(rundir / 'drc.json')},
-                )
-            except Exception as exc:
-                trace.finish_operation(op_id, 'preparation', status='failed', error=exc)
-                raise
+            run_id = f'{datetime.now():%H:%M:%S-%d%b%Y}-{task_name}'
+            rundir = output / cell
+            self.prepare_cell_output(rundir, cell, gds, drc, resolved_maps, resolved_decks)
             yield rundir, config, {**task_cfg, 'cell': cell, 'run_id': run_id, 'rundir': str(rundir),
                                    'gds': str(gds), 'drc': str(drc),
                                    'layer_map': [str(path) for path in resolved_maps]}
 
-    def allocate_rundir(self, output, cell, task_name='drc'):
-        """Allocate a fresh unique run directory for one cell execution."""
-        stamp = datetime.now().strftime('%H:%M:%S-%d%b%Y')
-        base_id = f'{stamp}-{task_name}'
-        run_id = base_id
-        counter = 1
-        while True:
-            rundir = output / cell / 'runs' / run_id / 'rundir'
-            if not rundir.parent.exists():
-                return run_id, rundir
-            run_id = f'{base_id}-{counter}'
-            counter += 1
+    def prepare_cell_output(self, rundir, cell, gds, drc, layer_maps, decks):
+        """Stage fresh input artifacts and replace the previous cell output after ingestion."""
+        if rundir.is_symlink():
+            raise ValueError(f'Cell output must not be a symbolic link: {rundir}')
+        if any(path.resolve().is_relative_to(rundir.resolve()) for path in (gds, drc, *layer_maps, *decks)):
+            raise ValueError(f'Cell output must not contain configured inputs: {rundir}')
+        rundir.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=f'.{cell}-', dir=rundir.parent) as workspace:
+            staged = Path(workspace) / 'current'
+            previous = Path(workspace) / 'previous'
+            trace = ConversationTrace(staged)
+            op_id = trace.start_operation(
+                'preparation',
+                {'cell': cell, 'gds': str(gds), 'drc': str(drc), 'layer_maps': [str(path) for path in layer_maps]},
+            )
+            InputLoader(gds_path=gds, drc_path=drc, output_dir=staged,
+                        layer_map_files=layer_maps, verbose=False).run()
+            trace.finish_operation(
+                op_id, 'preparation', status='completed',
+                outputs={'gds_json': str(rundir / 'gds.json'), 'drc_json': str(rundir / 'drc.json')},
+            )
+            if rundir.exists():
+                if not rundir.is_dir():
+                    raise ValueError(f'Cell output must be a directory: {rundir}')
+                rundir.rename(previous)
+            try:
+                staged.rename(rundir)
+            except OSError:
+                if previous.exists():
+                    previous.rename(rundir)
+                raise
 
 
 _steps = Steps()

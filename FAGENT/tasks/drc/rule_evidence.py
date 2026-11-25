@@ -61,7 +61,8 @@ class RuleEvidence:
                 for name in matched_layers
             },
             'mapping_diagnostics': copy.deepcopy(self.mapping_diagnostics),
-            'required_enclosure_user': required_enclosure_user,
+            'required_enclosure_user': rule_info.get('required_enclosure_user', required_enclosure_user),
+            'cover_groups': rule_info.get('cover_groups'),
             'required_area_user': rule_info.get('required_area_user'),
             'exception_regions': rule_info.get('exception_regions', []),
             'references': self.references,
@@ -214,7 +215,7 @@ class RuleEvidence:
 
     def _resolve_rule_layers(self, rule_name: str, rule_text: str, layer_map: dict) -> dict:
         """Identify physical layers, classify rule expressions, and emit explicit support diagnostics."""
-        tokens = set(re.findall(r'\b[A-Z][A-Z0-9_]*\b', f'{rule_name} {rule_text}'))
+        tokens = set(re.findall(r'\b[A-Z][A-Z0-9_]*\b', f'{rule_name} {rule_text}'.upper()))
         keywords = {
             'RECTANGLE', 'ENC', 'NOT', 'INTERACT', 'TOUCH', 'INSIDE', 'OUTSIDE',
             'ALSO', 'GOOD', 'OPPOSITE', 'ABUT', 'INT', 'INTERSECTING', 'ONLY',
@@ -253,6 +254,35 @@ class RuleEvidence:
             return {'matched': matched, 'supported': False, 'rule_type': 'unsupported', 'reason': 'No rule expression found'}
 
         expr_joined = ' '.join(expressions)
+
+        # Boolean coverage with an optional sequence of explicit region exclusions.
+        cover_pattern = re.compile(
+            r'([A-Z0-9_]+)\s+NOT\s+\(\s*([A-Z0-9_]+)\s+AND\s+'
+            r'\(\s*([A-Z0-9_]+)\s+OR\s+([A-Z0-9_]+)\s*\)\s*\)',
+            re.IGNORECASE,
+        )
+        excluded = re.fullmatch(
+            r'\(\s*\(\s*(.*?)\s*\)\s+NOT\s+INSIDE\s+([A-Z0-9_]+)\s*\)'
+            r'\s+NOT\s+INSIDE\s+([A-Z0-9_]+)',
+            expr_joined,
+            re.IGNORECASE,
+        )
+        cover = cover_pattern.fullmatch(excluded[1] if excluded else expr_joined)
+        exceptions = [name.upper() for name in excluded.groups()[1:]] if excluded else []
+        if cover:
+            inner, outer, alternative_a, alternative_b = (name.upper() for name in cover.groups())
+            required = [inner, outer, alternative_a, alternative_b, *exceptions]
+            err = self._check_required_layers(required, matched, ambiguous_layers)
+            return {
+                'matched': matched,
+                'supported': not err,
+                'rule_type': 'cover',
+                'target_layer': inner,
+                'cover_groups': [[outer], [alternative_a, alternative_b]],
+                'required_enclosure_user': 0.0,
+                'exception_regions': exceptions,
+                'reason': err,
+            }
 
         # 1. Bare directional enclosure (OPPOSITE without RECTANGLE) is unsupported
         bare_directional = re.fullmatch(

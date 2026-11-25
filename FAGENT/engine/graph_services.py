@@ -333,8 +333,6 @@ class GraphServices:
         if not isinstance(constraints, list) or any(not isinstance(item, str) or not item.strip() for item in constraints):
             raise ValueError('Knowledge constraints must be a list of non-empty strings')
         goal = self.config.get('goal', '')
-        if constraints:
-            goal = '\n'.join([goal, 'Constraints:', *(f'- {item}' for item in constraints)]).strip()
         return {'drc': compact, 'knowledge': {'references': references, 'constraints': constraints}, 'goal': goal}
 
     # --------------------------------------------------------------------------
@@ -447,6 +445,18 @@ class GraphServices:
     # --------------------------------------------------------------------------
     # LLM Interaction and Review Feedback Interpretation
     # --------------------------------------------------------------------------
+    def embed_texts(self, texts):
+        """Embed texts using the configured local GGUF and reuse the RAG embedding client."""
+        batch_size = self.config.get('embedding_batch_size', 32)
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError('embedding_batch_size must be a positive integer')
+        if self.embedding_client is None:
+            self.embedding_client = LlamaAdapter(self.config)
+        vectors = []
+        for start in range(0, len(texts), batch_size):
+            vectors.extend(self.embedding_client.embed_batch(texts[start:start + batch_size]))
+        return vectors
+
     def chat(self, messages, specs, response_schema=None):
         schema = self.workflow.response_schema if response_schema is None else response_schema
         req_id = self.conversation_trace.allocate_request_id()

@@ -158,6 +158,30 @@ def test_read_drc_excludes_missing_geometry_and_skipped_from_queue(tmp_path: Pat
     assert tasks[1]['status'] == 'pending'
 
 
+def test_read_drc_filters_rules_by_embedding_distance(tmp_path: Path) -> None:
+    """Distances below the configured threshold exclude entire rules."""
+    report = make_report([
+        {'name': 'CT_EN', 'description': ['Contact enclosure'], 'geometry': [{'id': 101}]},
+        {'name': 'GT_D', 'description': ['Density > 0.2'], 'geometry': [{'id': 201}]},
+        {'name': 'GT_A', 'geometry': [{'id': 301}]},
+    ])
+    services = FakeServices(tmp_path, report, make_gds_payload())
+    services.config.update(skip_prompt='bỏ qua lỗi density', skip_distance_threshold=0.25)
+    ctx = TaskContext('drc', {}, {}, services)
+
+    def embed_texts(texts):
+        assert texts == ['bỏ qua lỗi density', 'Contact enclosure', 'Density > 0.2', 'GT_A']
+        return [[1, 0], [0, 1], [1, 0], [3, 4]]
+
+    services.embed_texts = embed_texts
+    updates = read_drc(ctx)
+    assert [(task['rule'], task['violation_id']) for task in updates['checklist']['tasks']] == [
+        ('CT_EN', 101),
+        ('GT_A', 301),
+    ]
+    assert updates['task_queue'] == ['task-1', 'task-2']
+
+
 def test_read_drc_empty_report_produces_empty_queue(tmp_path: Path) -> None:
     """Empty DRC report produces an empty queue and None current_task_id."""
     report = make_report([])

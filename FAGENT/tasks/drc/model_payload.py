@@ -39,6 +39,33 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
                      'deck_file': evidence.get('deck_file'), 'line_start': evidence.get('line_start'),
                      'layer_mapping_provenance': evidence.get('layer_mapping_provenance', {})},
     }
+    cover_groups = evidence.get('cover_groups')
+    if cover_groups is not None:
+        violation['cover_groups'] = cover_groups
+    polygons = [_polygon(item, names) for item in layout.get('polygons', [])]
+    if evidence.get('supported') and cover_groups:
+        editable_ids = defaultdict(list)
+        for polygon in polygons:
+            if polygon['editable']:
+                editable_ids[tuple(polygon['lpp'])].append(polygon['id'])
+        candidates = {
+            'inner_ids': editable_ids[tuple(layer_map[evidence['target_layer']])],
+            'group_polygon_ids': [
+                list(dict.fromkeys(
+                    pid for layer in group for pid in editable_ids[tuple(layer_map[layer])]
+                ))
+                for group in cover_groups
+            ],
+        }
+        groups = candidates['group_polygon_ids']
+        if len(candidates['inner_ids']) == 1 and all(len(group) == 1 for group in groups):
+            candidates['propose_arguments'] = {
+                'task_id': state.get('current_task_id'),
+                'action': 'propose',
+                'inner_id': candidates['inner_ids'][0],
+                'groups': groups,
+            }
+        violation['fix_cover_candidates'] = candidates
     cfg = state.get('drc_context') or {}
     policy = services.build_system_message(goal=cfg.get('goal'), constraints=(cfg.get('knowledge') or {}).get('constraints'))
     library = getattr(getattr(services, 'layout', None), 'library', None)
@@ -57,7 +84,7 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
                 'search_region': (layout.get('search_region') or {}).get('bounds_user'),
                 'complete': layout.get('complete', False),
                 'candidate_digest': layout.get('candidate_digest'),
-                'polygons': [_polygon(item, names) for item in layout.get('polygons', [])],
+                'polygons': polygons,
                 'references_in_region': layout.get('references_in_region', []),
                 'paths_in_region': layout.get('paths_in_region', []),
                 'reason': layout.get('reason'),
