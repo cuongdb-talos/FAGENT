@@ -28,7 +28,6 @@ class FagentState(TypedDict, total=False):
         inspected: List of inspected element IDs or rule names.
         identity: Run metadata, timestamp, or model identity.
         candidate_digest: SHA256/hash of candidate layout to detect modifications.
-        plan_history: Chronological DRC plan versions and tool outcomes.
     """
     messages: list[dict[str, Any]]
     rundir: str
@@ -53,10 +52,6 @@ class FagentState(TypedDict, total=False):
     report: dict[str, Any]
     failed: bool
     pending_tools: bool
-    plan: dict[str, Any] | None
-    plan_history: list[dict[str, Any]]
-    replan_context: dict[str, Any] | None
-    replan_count: int
     proposals: dict[str, Any]
     tool_review: dict[str, Any] | None
     task_queue: list[str]

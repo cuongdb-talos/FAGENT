@@ -5,7 +5,7 @@
 # ==============================================================================
 import math
 
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import nearest_points, unary_union
 
 
@@ -390,3 +390,32 @@ class AreaCheck:
             'units': 'gds_user_units_sq',
             'reason': 'Polygon area is below minimum area',
         }
+
+
+class WidthCheck:
+    """Check the minimum bounding width/height of an axis-aligned rectangle."""
+
+    def run(self, polygon=None, minimum_width: float = 0.0, precision: float = 1e-3) -> dict:
+        self.result = self._evaluate(polygon, minimum_width, precision)
+        return self.result
+
+    def __init__(self):
+        self.result = None
+
+    def _evaluate(self, polygon, minimum_width, precision):
+        checker = CoverCheck()
+        if not checker._is_valid_number(minimum_width) or float(minimum_width) <= 0:
+            return {'status': 'unknown', 'reason': 'minimum_width must be a finite positive number', 'units': 'gds_user_units'}
+        if not checker._is_valid_number(precision) or float(precision) <= 0:
+            return {'status': 'unknown', 'reason': 'GDS precision must be a positive finite number', 'units': 'gds_user_units'}
+        poly, error = checker._to_polygon(polygon, 'polygon')
+        if error:
+            return {'status': 'unknown', 'reason': error, 'units': 'gds_user_units'}
+        x0, y0, x1, y1 = poly.bounds
+        rect = box(x0, y0, x1, y1)
+        if poly.symmetric_difference(rect).area > 1e-12:
+            return {'status': 'unknown', 'reason': 'Minimum width check supports axis-aligned rectangles only', 'units': 'gds_user_units'}
+        measured = min(x1 - x0, y1 - y0)
+        status = 'pass' if measured + 1e-12 >= float(minimum_width) else 'fail'
+        return {'status': status, 'minimum_width': float(minimum_width), 'measured_width': measured,
+                'units': 'gds_user_units', 'reason': 'Polygon width satisfies minimum width' if status == 'pass' else 'Polygon width is below minimum width'}

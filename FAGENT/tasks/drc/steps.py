@@ -301,7 +301,7 @@ def repair_route(context):
 def verify_current_task(context):
     task_id = context.state['current_task_id']
     transaction = context.state['task_transactions'][task_id]
-    check = {'area': DrcTools.check_area, 'cover': DrcTools.check_cover}[transaction['kind']]
+    check = {'area': DrcTools.check_area, 'cover': DrcTools.check_cover, 'width': DrcTools.check_width}[transaction['kind']]
     result = check(context, task_id)
     updates = dict(result.updates)
     if result.payload.get('status') != 'pass' and not result.payload.get('rolled_back'):

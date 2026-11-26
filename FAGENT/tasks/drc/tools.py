@@ -1,12 +1,12 @@
-"""Expose the five DRC repair, check, and save tools with transactional candidate state."""
+"""Expose staged DRC repair and check tools with transactional candidate state."""
 
 # === SECTION 1: Imports ===
 import copy
 import shutil
 from pathlib import Path
 
-from FAGENT.capabilities.layout.cover_check import AreaCheck, CoverCheck
-from FAGENT.capabilities.layout.repair_proposals import AreaProposalBuilder, CoverProposalBuilder
+from FAGENT.capabilities.layout.cover_check import AreaCheck, CoverCheck, WidthCheck
+from FAGENT.capabilities.layout.repair_proposals import AreaProposalBuilder, CoverProposalBuilder, WidthProposalBuilder
 from FAGENT.engine.graph_services import GraphServices
 from FAGENT.engine.task_contracts import ToolResult, ToolSpec
 
@@ -19,8 +19,8 @@ class DrcTools:
     # Main Entry Point & Initialization
     # --------------------------------------------------------------------------
     def run(self):
-        """Expose the five registered DRC tool specifications."""
-        self.tools = [fix_cover, fix_area, check_cover, check_area, save_gds]
+        """Expose model-facing repair and check tools; saving remains an internal workflow step."""
+        self.tools = [fix_cover, fix_area, fix_width, check_cover, check_area, check_width]
         return self.tools
 
     def __init__(self):
@@ -112,6 +112,7 @@ class DrcTools:
         polygon_id: str | None = None,
         minimum_area: float | None = None,
         proposal_id: str | None = None,
+        cover_context: dict | None = None,
     ) -> ToolResult:
         """Propose or atomically apply an area repair using a model-selected polygon ID."""
         if action not in ("propose", "apply"):
@@ -123,7 +124,7 @@ class DrcTools:
         if err:
             return ToolResult({"status": "unknown", "reason": err, "proposals": []}, {})
 
-        if minimum_area is None:
+        if minimum_area is None and cover_context is None:
             return ToolResult({"status": "unknown", "reason": "minimum_area is required for a proposal", "proposals": []}, {})
         if not polygon_id:
             return ToolResult({"status": "unknown", "reason": "polygon_id is required", "proposals": []}, {})
@@ -132,14 +133,22 @@ class DrcTools:
         cell_name = resolved["cell_name"]
         try:
             poly_pts = layout.polygon_ids.resolve(cell_name, polygon_id).points.tolist()
+            protected = []
+            if cover_context is not None:
+                protected_ids = cover_context.get("protected_inner_ids")
+                if not isinstance(protected_ids, list) or not protected_ids:
+                    return ToolResult({"status": "unknown", "reason": "cover_context requires protected_inner_ids", "proposals": []}, {})
+                protected = [layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in protected_ids]
         except (KeyError, ValueError, TypeError) as exc:
             return ToolResult({"status": "unknown", "reason": f"Unknown polygon_id: {exc}", "proposals": []}, {})
 
         built = AreaProposalBuilder().run(
             polygon_points=poly_pts,
-            minimum_area=float(minimum_area),
+            minimum_area=float(minimum_area) if minimum_area is not None else None,
             grid=resolved["grid"],
             polygon_id=polygon_id,
+            cover_context=cover_context,
+            inner_polygons=protected,
         )
         return DrcTools._stage_built_proposals(
             context,
@@ -147,7 +156,7 @@ class DrcTools:
             task_id=task_id,
             kind="area",
             built=built,
-            bound_inputs={"polygon_id": polygon_id, "minimum_area": float(minimum_area)},
+            bound_inputs={"polygon_id": polygon_id, "minimum_area": float(minimum_area) if minimum_area is not None else None, "cover_context": cover_context},
         )
 
     def check_cover(context, task_id: str) -> ToolResult:
@@ -157,6 +166,51 @@ class DrcTools:
     def check_area(context, task_id: str) -> ToolResult:
         """Verify staged area transaction on live layout; rollback all task edits on failure."""
         return DrcTools._check_transaction(context, task_id=task_id, expected_kind="area")
+
+    def fix_width(context, task_id: str, action: str, polygon_id: str | None = None,
+                  minimum_width: float | None = None, proposal_id: str | None = None,
+                  preserve_cover: bool = True, cover_context: dict | None = None,
+                  resize_mode: str = 'expand_only') -> ToolResult:
+        """Propose or apply a minimum-width repair, preserving supplied cover relations."""
+        if action not in ('propose', 'apply'):
+            return ToolResult({'status': 'rejected', 'reason': f'Unsupported action: {action}'}, {})
+        if action == 'apply':
+            return DrcTools._apply_proposal(context, task_id, 'width', proposal_id)
+        resolved, err = DrcTools._resolve_task_context(context, task_id)
+        if err:
+            return ToolResult({'status': 'unknown', 'reason': err, 'proposals': []}, {})
+        if not polygon_id or minimum_width is None:
+            return ToolResult({'status': 'unknown', 'reason': 'polygon_id and minimum_width are required for propose', 'proposals': []}, {})
+        if isinstance(minimum_width, bool) or not isinstance(minimum_width, (int, float)) or minimum_width <= 0:
+            return ToolResult({'status': 'unknown', 'reason': 'minimum_width must be a positive number in GDS user units', 'proposals': []}, {})
+        if not isinstance(preserve_cover, bool):
+            return ToolResult({'status': 'unknown', 'reason': 'preserve_cover must be a boolean', 'proposals': []}, {})
+        if cover_context is not None and not isinstance(cover_context, dict):
+            return ToolResult({'status': 'unknown', 'reason': 'cover_context must be an object', 'proposals': []}, {})
+        layout, cell_name = resolved['layout'], resolved['cell_name']
+        try:
+            points = layout.polygon_ids.resolve(cell_name, polygon_id).points.tolist()
+            cover_polygons = {}
+            if cover_context:
+                ids = list(cover_context.get('protected_inner_ids') or [])
+                ids.extend(pid for group in cover_context.get('groups', []) for pid in group)
+                cover_polygons = {pid: layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in dict.fromkeys(ids)}
+        except (KeyError, ValueError, TypeError) as exc:
+            return ToolResult({'status': 'unknown', 'reason': f'Unknown polygon_id in cover_context: {exc}', 'proposals': []}, {})
+        built = WidthProposalBuilder().run(
+            polygon_points=points, minimum_width=float(minimum_width), grid=resolved['grid'],
+            polygon_id=polygon_id, preserve_cover=preserve_cover,
+            cover_context=cover_context, cover_polygons=cover_polygons, resize_mode=resize_mode,
+        )
+        return DrcTools._stage_built_proposals(
+            context, resolved=resolved, task_id=task_id, kind='width', built=built,
+            bound_inputs={'polygon_id': polygon_id, 'minimum_width': float(minimum_width),
+                          'preserve_cover': preserve_cover, 'cover_context': cover_context},
+        )
+
+    def check_width(context, task_id: str) -> ToolResult:
+        """Verify width and optional cover preservation after fix_width apply."""
+        return DrcTools._check_transaction(context, task_id=task_id, expected_kind='width')
 
     def save_gds(context) -> ToolResult:
         """Save the final verified candidate GDS once the task queue is complete."""
@@ -336,6 +390,28 @@ class DrcTools:
             },
         )
 
+    def _check_bound_cover(layout, cell_name: str, polygon_id: str, target_points: list,
+                           cover_context: dict, grid: float) -> dict:
+        """Check either target-as-inner groups or target-as-cover protected polygons."""
+        minimum = cover_context.get('minimum_enclosure', 0)
+        results = []
+        try:
+            if cover_context.get('groups'):
+                groups = [[layout.polygon_ids.resolve(cell_name, pid).points.tolist() for pid in group]
+                          for group in cover_context['groups']]
+                results.append(CoverCheck().run(inner=target_points, groups=groups, minimum=minimum, precision=grid))
+            for inner_id in cover_context.get('protected_inner_ids', []):
+                inner = layout.polygon_ids.resolve(cell_name, inner_id).points.tolist()
+                results.append(CoverCheck().run(inner=inner, outer=target_points, minimum=minimum, precision=grid))
+        except (KeyError, ValueError, TypeError) as exc:
+            return {'status': 'unknown', 'reason': f'Cannot resolve cover_context polygon ID: {exc}'}
+        if not results:
+            return {'status': 'unknown', 'reason': 'cover_context must include groups or protected_inner_ids'}
+        status = 'unknown' if any(item.get('status') == 'unknown' for item in results) else (
+            'pass' if all(item.get('status') == 'pass' for item in results) else 'fail'
+        )
+        return {'status': status, 'checks': results}
+
     def _check_transaction(context, task_id: str, expected_kind: str) -> ToolResult:
         """Run local check against live layout for staged task transaction; rollback on failure."""
         tx_map = copy.deepcopy(context.state.get("task_transactions") or {})
@@ -361,7 +437,15 @@ class DrcTools:
             res = CoverCheck().run(inner=inner_pts, groups=group_pts, minimum=bound["minimum_enclosure"], precision=grid)
         else:
             poly_pts = layout.polygon_ids.resolve(cell_name, bound["polygon_id"]).points.tolist()
-            res = AreaCheck().run(polygon=poly_pts, minimum_area=bound["minimum_area"], precision=grid)
+            if expected_kind == 'width':
+                res = WidthCheck().run(poly_pts, bound['minimum_width'], precision=grid)
+            else:
+                res = AreaCheck().run(polygon=poly_pts, minimum_area=bound["minimum_area"], precision=grid) if bound.get("minimum_area") is not None else {"status": "pass"}
+            cover_context = bound.get("cover_context")
+            if res.get("status") == "pass" and bound.get('preserve_cover', True) and cover_context:
+                cover_results = DrcTools._check_bound_cover(layout, cell_name, bound['polygon_id'], poly_pts, cover_context, grid)
+                res = {"status": "pass" if cover_results.get('status') == 'pass' else cover_results.get('status', 'fail'),
+                       "width_or_area": res, "cover": cover_results, "reason": "Cover context recheck"}
 
         checks_map = copy.deepcopy(context.state.get("task_checks") or {})
         current_digest = context.state.get("candidate_digest")
@@ -429,28 +513,47 @@ class DrcTools:
                     return True
         return False
 
-
 # === SECTION 3: ToolSpec Registrations ===
 fix_cover = DrcTools.fix_cover
 fix_cover.task_tool = ToolSpec(
     function=fix_cover,
-    description="Propose a cover repair from model-selected polygon IDs and a model-derived uniform enclosure, or apply a staged proposal.",
+    description=(
+        "Copy IDs from layout.polygons[].id. For propose, provide task_id, inner_id, groups and minimum_enclosure in GDS user units. "
+        "For apply, provide task_id and a returned proposal_id. Local checks are not full-deck DRC."
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string", "description": "Use the current input task_id."},
-            "action": {"type": "string", "enum": ["propose", "apply"]},
-            "minimum_enclosure": {
-                "type": "number", "minimum": 0,
-                "description": "Model-derived uniform minimum enclosure in GDS user units for propose.",
+            "task_id": {
+                "type": "string",
+                "description": "Current checklist task ID. Required for both 'propose' and 'apply'.",
             },
-            "inner_id": {"type": "string", "description": "Editable inner polygon ID from layout.polygons[].id."},
+            "action": {
+                "type": "string",
+                "enum": ["propose", "apply"],
+                "description": "Use 'propose' to generate fix options; use 'apply' to apply one returned proposal_id.",
+            },
+            "minimum_enclosure": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Required for 'propose'. Minimum enclosure in GDS user units; use 0 if only coverage is required.",
+            },
+            "inner_id": {
+                "type": "string",
+                "description": "Required for 'propose'. Target polygon ID to be covered, copied from layout.polygons[].id.",
+            },
             "groups": {
                 "type": "array",
-                "description": "Ordered groups of editable polygon IDs. Each group is a union that must cover the inner polygon.",
+                "description": (
+                    "Required for 'propose'. List of covering polygon ID groups. "
+                    "IDs inside one group mean OR; multiple groups mean AND (inner_id must be covered by every group)."
+                ),
                 "items": {"type": "array", "items": {"type": "string"}},
             },
-            "proposal_id": {"type": "string", "description": "For apply, use the ID returned by a suitable proposal from this tool."},
+            "proposal_id": {
+                "type": "string",
+                "description": "Required for 'apply'. Exact proposal_id returned by a prior 'propose' call.",
+            },
         },
         "required": ["task_id", "action"],
         "additionalProperties": False,
@@ -461,18 +564,77 @@ fix_area = DrcTools.fix_area
 fix_area.task_tool = ToolSpec(
     function=fix_area,
     description=(
-        "Repair a minimum-area violation using the area inferred from the current rule text. "
-        "Propose with polygon_id and minimum_area. Apply a suitable proposal with the returned proposal_id, "
-        "then call check_area after successful apply. Use GDS user units."
+        "Copy polygon_id values from layout.polygons[].id. For propose, provide task_id, polygon_id and minimum_area in squared GDS user units, "
+        "or cover_context to contract an oversized cover while preserving its protected inner polygons. "
+        "For apply, provide task_id and a returned proposal_id. Local checks are not full-deck DRC."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string", "description": "Use the current input task_id."},
+            "task_id": {
+                "type": "string",
+                "description": "Current checklist task ID. Required for both 'propose' and 'apply'.",
+            },
+            "action": {
+                "type": "string",
+                "enum": ["propose", "apply"],
+                "description": "Use 'propose' to generate fix options; use 'apply' to apply one returned proposal_id.",
+            },
+            "polygon_id": {
+                "type": "string",
+                "description": "Required for 'propose'. Target polygon ID to resize, copied from layout.polygons[].id.",
+            },
+            "minimum_area": {
+                "type": "number",
+                "description": "Required for minimum-area repairs; optional with cover_context to enforce an additional area floor while shrinking.",
+            },
+            "cover_context": {
+                "type": "object",
+                "description": "For safely shrinking a covering polygon. protected_inner_ids lists polygons that must remain enclosed; minimum_enclosure defaults to 0.",
+                "properties": {
+                    "protected_inner_ids": {"type": "array", "items": {"type": "string"}},
+                    "minimum_enclosure": {"type": "number", "minimum": 0, "default": 0},
+                },
+                "required": ["protected_inner_ids"],
+                "additionalProperties": False,
+            },
+            "proposal_id": {
+                "type": "string",
+                "description": "Required for 'apply'. Exact proposal_id returned by a prior 'propose' call.",
+            },
+        },
+        "required": ["task_id", "action"],
+        "additionalProperties": False,
+    },
+)
+
+fix_width = DrcTools.fix_width
+fix_width.task_tool = ToolSpec(
+    function=fix_width,
+    description=(
+        "Copy polygon IDs from layout.polygons[].id. For propose, provide task_id, polygon_id and minimum_width in GDS user units; "
+        "optional cover_context preserves coverage/enclosure. For apply, provide task_id and a returned proposal_id."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "Current checklist task ID."},
             "action": {"type": "string", "enum": ["propose", "apply"]},
-            "polygon_id": {"type": "string", "description": "For propose, select the editable ID from layout.polygons[].id that matches the marker and target layer."},
-            "minimum_area": {"type": "number", "description": "For propose, provide the minimum area inferred from the rule text in squared GDS user units."},
-            "proposal_id": {"type": "string", "description": "For apply, use the ID returned by a suitable proposal from this tool."},
+            "polygon_id": {"type": "string", "description": "Polygon ID copied verbatim from layout.polygons[].id; required for propose."},
+            "minimum_width": {"type": "number", "exclusiveMinimum": 0, "description": "Required minimum width in GDS user units; required for propose."},
+            "proposal_id": {"type": "string", "description": "Required for apply; use an ID returned by propose."},
+            "preserve_cover": {"type": "boolean", "default": True},
+            "cover_context": {
+                "type": "object",
+                "description": "Optional cover relations: groups for this polygon as inner, or protected_inner_ids for this polygon as cover.",
+                "properties": {
+                    "groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                    "protected_inner_ids": {"type": "array", "items": {"type": "string"}},
+                    "minimum_enclosure": {"type": "number", "minimum": 0, "default": 0},
+                },
+                "additionalProperties": False,
+            },
+            "resize_mode": {"type": "string", "enum": ["expand_only", "center", "keep_edges"], "default": "expand_only"},
         },
         "required": ["task_id", "action"],
         "additionalProperties": False,
@@ -483,14 +645,16 @@ check_cover = DrcTools.check_cover
 check_cover.task_tool = ToolSpec(
     function=check_cover,
     description=(
-        "After successful fix_cover apply, check the staged edit against its bound inputs. "
-        "Evaluate the entire selected inner polygon, including portions within exception layers. "
-        "A failed check rolls back the edit. The local result has deck_clean: false."
+        "Verify coverage/enclosure after fix_cover('apply'). "
+        "Returns status, measurement, candidate_digest, deck_clean=false, and rolled_back=true if check fails."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string", "description": "Use the current input task_id."},
+            "task_id": {
+                "type": "string",
+                "description": "Task ID that was just applied with fix_cover.",
+            },
         },
         "required": ["task_id"],
         "additionalProperties": False,
@@ -501,14 +665,29 @@ check_area = DrcTools.check_area
 check_area.task_tool = ToolSpec(
     function=check_area,
     description=(
-        "After successful fix_area apply, check the staged edit against minimum_area. "
-        "A failed check rolls back the edit. The local result has deck_clean: false."
+        "Verify minimum polygon area after fix_area('apply'). "
+        "Returns status, measurement, candidate_digest, deck_clean=false, and rolled_back=true if check fails."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "task_id": {"type": "string", "description": "Use the current input task_id."},
+            "task_id": {
+                "type": "string",
+                "description": "Task ID that was just applied with fix_area.",
+            },
         },
+        "required": ["task_id"],
+        "additionalProperties": False,
+    },
+)
+
+check_width = DrcTools.check_width
+check_width.task_tool = ToolSpec(
+    function=check_width,
+    description="Verify minimum width and supplied cover conditions after fix_width apply; failed checks roll back the transaction.",
+    parameters={
+        "type": "object",
+        "properties": {"task_id": {"type": "string", "description": "Task ID just applied with fix_width."}},
         "required": ["task_id"],
         "additionalProperties": False,
     },
@@ -517,7 +696,10 @@ check_area.task_tool = ToolSpec(
 save_gds = DrcTools.save_gds
 save_gds.task_tool = ToolSpec(
     function=save_gds,
-    description="Save the final candidate GDS after queue completion. The workflow save node handles this after marker processing.",
+    description=(
+        "Internal workflow step only; do not call directly. "
+        "Saves the candidate GDS after the task queue finishes and returns status, output_path, digest, and task_summary."
+    ),
     parameters={
         "type": "object",
         "properties": {},

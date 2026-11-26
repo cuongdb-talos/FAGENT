@@ -78,10 +78,9 @@ và goal. Các rule sạch được lược khỏi context; báo cáo đầy đ�
 state để đối chiếu checklist. Marker ID là ID của vi phạm trong DRC report,
 không mặc định là polygon ID trong GDS; agent cần dùng `read_gds` để kiểm tra.
 Constraints chung nằm trong `FAGENT/knowledge/constraints.json`, là danh sách
-chuỗi JSON; chúng được thêm vào goal của cả `plan` và `repair`. Có thể chỉ định
-file khác bằng `constraints_file` trong config. Node `plan` tạo checklist;
-node `repair` nhận checklist và gọi tool. `conversation.json` được cập nhật
-sau mỗi phản hồi model và kết quả tool.
+chuỗi JSON; chúng được thêm vào goal của bước `repair`. Có thể chỉ định file
+khác bằng `constraints_file` trong config. Bước `repair` nhận checklist và gọi
+tool. `conversation.json` được cập nhật sau mỗi phản hồi model và kết quả tool.
 
 1. **Cách ly lượt chạy (Run Isolation):**
    - Mỗi cell được chạy trong một thư mục độc lập: `output/<cell>/runs/<run_id>/rundir/`.
@@ -94,11 +93,11 @@ sau mỗi phản hồi model và kết quả tool.
    - Báo cáo chi tiết các đoạn mép vi phạm và độ thiếu hụt (`shortage`). Trả về trạng thái `unknown` khi hình học phức tạp hoặc không xác định.
 4. **Quản lý Checklist trạng thái vi phạm (Report-Driven):**
    - Danh sách vi phạm chuẩn được trích xuất trực tiếp từ báo cáo DRC theo đúng thứ tự gốc.
-   - Gợi ý từ model được đối chiếu 1-1 với báo cáo; nếu model bỏ sót vi phạm nào, vi phạm đó tự động chuyển sang trạng thái `unresolved` với lý do chưa có kế hoạch sửa.
+   - Gợi ý từ model được đối chiếu 1-1 với báo cáo; nếu model bỏ sót vi phạm nào, vi phạm đó tự động chuyển sang trạng thái `unresolved` với lý do chưa có task tương ứng.
    - Checklist lưu trữ tại `checklist.json` trong rundir với các trạng thái: `pending`, `in_progress`, `pass`, `skipped`, `unresolved`.
    - Mục tiêu cấu hình (`goal`) cho phép tự động bỏ qua (skip) các vi phạm được loại trừ (ví dụ density).
    - Khi bất kỳ polygon nào bị thay đổi, các task đã `pass` phụ thuộc vào polygon đó sẽ tự động chuyển sang trạng thái `stale` (cần đánh giá lại).
-   - Lỗi định dạng JSON hoặc ngoại lệ mô hình ở step plan vẫn kích hoạt fail-fast chứ không tự ý hoàn tất giả định.
+   - Lỗi định dạng JSON hoặc ngoại lệ mô hình không tự ý hoàn tất giả định.
 5. **Tính chân thực của xác minh (Verification Truthfulness):**
    - Đánh giá `pass` trên checklist là nhận định hình học của agent, **không phải kết quả DRC Calibre chính thức**.
    - Báo cáo kết quả cuối cùng giữ trạng thái `incomplete` trừ khi có bằng chứng chạy DRC thực tế hỗ trợ.

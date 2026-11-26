@@ -1,8 +1,7 @@
 {
   "agent_model_path": "/run/media/cuongdb3/119e300b-6212-4691-8208-a0adf2354aaa/home/cuongdb3/AI_BUNDLE/models/blobs/sha256-60e05f2100071479f596b964f89f510f057ce397ea22f2833a0cfe029bfc2463",
-  "agent_n_ctx": 32768,
-  "agent_offload_kqv" : false,
-  "agent_n_threads": 6,
+  "agent_n_ctx": 32000,
+  "agent_offload_kqv": false,
   "agent_n_gpu_layers": -1,
   "agent_flash_attn": true,
   "agent_type_k": "q8_0",

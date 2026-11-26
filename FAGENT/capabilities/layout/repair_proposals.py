@@ -3,7 +3,7 @@ import copy
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from shapely.geometry import box as shapely_box, Polygon as ShapelyPolygon
 
-from .cover_check import AreaCheck, CoverCheck
+from .cover_check import AreaCheck, CoverCheck, WidthCheck
 
 
 # === SECTION 2: Repair Proposals Engine Class ===
@@ -447,13 +447,18 @@ class AreaProposalBuilder:
     def run(
         self,
         polygon_points: list,
-        minimum_area: float,
+        minimum_area: float | None = None,
         grid: float = 1e-3,
         polygon_id: str = 'poly',
+        cover_context: dict | None = None,
+        inner_polygons: list | None = None,
     ) -> dict:
-        """Evaluate area and generate deterministic grid-aligned rectangular expansion proposals."""
+        """Build a minimum-area expansion or cover-preserving contraction proposal."""
         self.polygon_id = polygon_id
-        self.result = self._build(polygon_points, minimum_area, grid, polygon_id)
+        self.result = self._build(
+            polygon_points, minimum_area, grid, polygon_id,
+            cover_context=cover_context, inner_polygons=inner_polygons,
+        )
         return self.result
 
     # --------------------------------------------------------------------------
@@ -467,8 +472,14 @@ class AreaProposalBuilder:
     # --------------------------------------------------------------------------
     # Proposal Generation Helpers
     # --------------------------------------------------------------------------
-    def _build(self, polygon_points, minimum_area, grid, polygon_id) -> dict:
+    def _build(self, polygon_points, minimum_area, grid, polygon_id, cover_context=None, inner_polygons=None) -> dict:
         """Check area and compute a grid-snapped rectangular expansion meeting minimum_area."""
+        if cover_context is not None:
+            return self._build_cover_contraction(
+                polygon_points, grid, polygon_id, cover_context, inner_polygons or [], minimum_area,
+            )
+        if minimum_area is None:
+            return {'status': 'unknown', 'measurement': {}, 'proposals': [], 'reason': 'minimum_area is required without cover_context'}
         area_res = AreaCheck().run(polygon=polygon_points, minimum_area=minimum_area, precision=grid)
         if area_res.get('status') in ('unknown', 'pass'):
             return {
@@ -533,3 +544,129 @@ class AreaProposalBuilder:
             }],
             'reason': '',
         }
+
+    def _build_cover_contraction(self, polygon_points, grid, polygon_id, cover_context, inner_polygons, minimum_area):
+        """Contract an axis-aligned cover polygon to the grid-snapped bounds of its protected inners."""
+        helper = RepairProposals()
+        ids = cover_context.get('protected_inner_ids')
+        enclosure = cover_context.get('minimum_enclosure', 0)
+        if not isinstance(ids, list) or not ids or len(ids) != len(inner_polygons):
+            return {'status': 'unknown', 'measurement': {}, 'proposals': [], 'reason': 'cover_context requires resolvable protected_inner_ids'}
+        if not helper._is_axis_aligned_rect(polygon_points):
+            return {'status': 'unknown', 'measurement': {}, 'proposals': [], 'reason': 'Cover-preserving area contraction supports axis-aligned rectangles only'}
+        if isinstance(enclosure, bool) or not isinstance(enclosure, (int, float)) or enclosure < 0:
+            return {'status': 'unknown', 'measurement': {}, 'proposals': [], 'reason': 'minimum_enclosure must be non-negative'}
+        grid_dec = Decimal(str(grid))
+        margin = Decimal(str(enclosure))
+        bounds = [ShapelyPolygon(points).bounds for points in inner_polygons]
+        min_x = min(b[0] for b in bounds) - float(margin)
+        min_y = min(b[1] for b in bounds) - float(margin)
+        max_x = max(b[2] for b in bounds) + float(margin)
+        max_y = max(b[3] for b in bounds) + float(margin)
+        snapped = [
+            float((Decimal(str(min_x)) / grid_dec).to_integral_value(rounding=ROUND_FLOOR) * grid_dec),
+            float((Decimal(str(min_y)) / grid_dec).to_integral_value(rounding=ROUND_FLOOR) * grid_dec),
+            float((Decimal(str(max_x)) / grid_dec).to_integral_value(rounding=ROUND_CEILING) * grid_dec),
+            float((Decimal(str(max_y)) / grid_dec).to_integral_value(rounding=ROUND_CEILING) * grid_dec),
+        ]
+        before = ShapelyPolygon(polygon_points)
+        after = shapely_box(*snapped)
+        if not before.covers(after) or (minimum_area is not None and after.area + 1e-12 < float(minimum_area)):
+            return {'status': 'unknown', 'measurement': {}, 'proposals': [], 'reason': 'Required cover bounds do not permit a safe area contraction'}
+        cover_results = [
+            CoverCheck().run(inner=inner, outer=list(after.exterior.coords)[:-1], minimum=float(enclosure), precision=grid)
+            for inner in inner_polygons
+        ]
+        if any(result.get('status') != 'pass' for result in cover_results):
+            return {'status': 'unknown', 'measurement': cover_results, 'proposals': [], 'reason': 'Contracted geometry failed cover recheck'}
+        if before.equals(after):
+            return {'status': 'pass', 'measurement': {'area_before': before.area, 'area_after': after.area}, 'proposals': [], 'reason': 'Polygon already has minimum cover bounds'}
+        points = list(after.exterior.coords)[:-1]
+        return {
+            'status': 'fail', 'measurement': {'area_before': before.area, 'area_after': after.area, 'cover': cover_results},
+            'proposals': [{'changes': [{'polygon_id': polygon_id, 'before_points_user': polygon_points, 'after_points_user': points}],
+                           'rule_assumptions': 'Contract to grid-snapped bounds of protected inner polygons while preserving enclosure',
+                           'local_check': {'status': 'pass', 'cover': cover_results}}], 'reason': '',
+        }
+
+
+class WidthProposalBuilder:
+    """Generate grid-aligned width repairs for supported rectangular polygons."""
+
+    def run(self, polygon_points: list, minimum_width: float, grid: float = 1e-3,
+            polygon_id: str = 'poly', preserve_cover: bool = True,
+            cover_context: dict | None = None, cover_polygons: dict | None = None,
+            resize_mode: str = 'expand_only') -> dict:
+        self.result = self._build(polygon_points, minimum_width, grid, polygon_id, preserve_cover,
+                                  cover_context, cover_polygons or {}, resize_mode)
+        return self.result
+
+    def __init__(self):
+        self.result = None
+
+    def _build(self, polygon_points, minimum_width, grid, polygon_id, preserve_cover,
+               cover_context, cover_polygons, resize_mode):
+        check = WidthCheck().run(polygon_points, minimum_width, grid)
+        if check['status'] in ('unknown', 'pass'):
+            return {'status': check['status'], 'measurement': check, 'proposals': [], 'reason': check.get('reason', '')}
+        if resize_mode not in ('expand_only', 'center', 'keep_edges'):
+            return {'status': 'unknown', 'measurement': check, 'proposals': [], 'reason': f'Unsupported resize_mode: {resize_mode}'}
+        polygon = ShapelyPolygon(polygon_points)
+        x0, y0, x1, y1 = polygon.bounds
+        width, height = x1 - x0, y1 - y0
+        deficient_x = width < float(minimum_width)
+        deficient_y = height < float(minimum_width)
+        grid_d = Decimal(str(grid))
+        delta_x = (Decimal(str(max(0.0, float(minimum_width) - width))) / grid_d).to_integral_value(rounding=ROUND_CEILING) * grid_d
+        delta_y = (Decimal(str(max(0.0, float(minimum_width) - height))) / grid_d).to_integral_value(rounding=ROUND_CEILING) * grid_d
+        expand_x, expand_y = delta_x, delta_y
+        if resize_mode == 'center':
+            expand_x = ((delta_x / 2) / grid_d).to_integral_value(rounding=ROUND_CEILING) * grid_d
+            expand_y = ((delta_y / 2) / grid_d).to_integral_value(rounding=ROUND_CEILING) * grid_d
+            options = [('center', 'center', 'center')]
+        else:
+            x_sides = ('left', 'right') if deficient_x else (None,)
+            y_sides = ('bottom', 'top') if deficient_y else (None,)
+            options = [(x_side, x_side, y_side) for x_side in x_sides for y_side in y_sides]
+        candidates = []
+        for _, x_direction, y_direction in options:
+            coords = [x0, y0, x1, y1]
+            if x_direction == 'left': coords[0] = float(Decimal(str(x0)) - expand_x)
+            elif x_direction == 'right': coords[2] = float(Decimal(str(x1)) + expand_x)
+            elif x_direction == 'center':
+                coords[0], coords[2] = float(Decimal(str(x0)) - expand_x), float(Decimal(str(x1)) + expand_x)
+            if y_direction == 'bottom': coords[1] = float(Decimal(str(y0)) - expand_y)
+            elif y_direction == 'top': coords[3] = float(Decimal(str(y1)) + expand_y)
+            elif y_direction == 'center':
+                coords[1], coords[3] = float(Decimal(str(y0)) - expand_y), float(Decimal(str(y1)) + expand_y)
+            candidate = shapely_box(*coords)
+            points = list(candidate.exterior.coords)[:-1]
+            width_check = WidthCheck().run(points, minimum_width, grid)
+            if width_check.get('status') != 'pass':
+                continue
+            cover_check = self._check_cover(points, cover_context, cover_polygons, grid) if preserve_cover and cover_context else {'status': 'pass'}
+            if cover_check.get('status') == 'pass':
+                candidates.append((candidate.area, points, width_check, cover_check))
+        if not candidates:
+            return {'status': 'unknown', 'measurement': check, 'proposals': [],
+                    'reason': 'No grid-snapped minimum-width candidate preserves the supplied cover context'}
+        _, after_points, width_check, cover_check = min(candidates, key=lambda item: item[0])
+        return {'status': 'fail', 'measurement': check, 'proposals': [{
+            'changes': [{'polygon_id': polygon_id, 'before_points_user': polygon_points, 'after_points_user': after_points}],
+            'rule_assumptions': f'Expand rectangular polygon using resize_mode={resize_mode} and snap to GDS grid',
+            'local_check': {'status': 'pass', 'width': width_check, 'cover': cover_check},
+        }], 'reason': ''}
+
+    def _check_cover(self, after_points, cover_context, cover_polygons, grid):
+        minimum = float(cover_context.get('minimum_enclosure', 0))
+        results = []
+        if cover_context.get('groups'):
+            groups = [[cover_polygons[pid] for pid in group] for group in cover_context['groups']]
+            results.append(CoverCheck().run(inner=after_points, groups=groups, minimum=minimum, precision=grid))
+        for inner_id in cover_context.get('protected_inner_ids', []):
+            results.append(CoverCheck().run(inner=cover_polygons[inner_id], outer=after_points,
+                                            minimum=minimum, precision=grid))
+        if not results:
+            return {'status': 'unknown', 'reason': 'cover_context has no resolvable cover relation'}
+        return {'status': 'pass' if all(item.get('status') == 'pass' for item in results) else 'fail',
+                'checks': results}

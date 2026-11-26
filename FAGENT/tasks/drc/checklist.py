@@ -350,7 +350,7 @@ class Checklist:
                 if not self._skip_allowed(rule, reason, goal):
                     raise ValueError(f'Skip not permitted by configured goal for rule {rule}')
             elif status not in ('pending', 'unresolved'):
-                raise ValueError(f'Invalid initial plan status {status!r} for rule {rule}')
+                raise ValueError(f'Invalid initial task status {status!r} for rule {rule}')
             matched_by_idx[target_idx] = {
                 'rule': expected_items[target_idx]['rule'],
                 'violation_id': expected_items[target_idx]['violation_id'],
@@ -373,7 +373,7 @@ class Checklist:
                     work = f'Investigate missing geometry for {expected["rule"]}'
                 else:
                     status = 'unresolved'
-                    reason = 'No plan supplied by model for this reported violation'
+                    reason = 'No task supplied by model for this reported violation'
                     work = f'Inspect {expected["rule"]}'
                 reconciled.append({
                     'rule': expected['rule'],

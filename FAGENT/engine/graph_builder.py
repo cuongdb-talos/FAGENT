@@ -4,7 +4,7 @@
 # SECTION 1: Third-Party LangGraph Imports
 # ==============================================================================
 from functools import partial
-
+import json
 from langgraph.graph import END, START, StateGraph
 
 # ==============================================================================
@@ -56,8 +56,6 @@ class GraphBuilder:
                     [END, node, review_node],
                 )
                 tool_routes.append(review_node)
-                if any(s.id == 'plan' for s in steps):
-                    tool_routes.append(nodes.node_name('plan'))
                 graph.add_conditional_edges(tool_node, partial(nodes.route_task_tools, step=step), list(dict.fromkeys(tool_routes)))
             graph.add_conditional_edges(node, partial(nodes.route_task_step, step=step), list(dict.fromkeys(routes)))
         graph.add_edge(START, nodes.node_name(getattr(self.services.workflow, 'entry', steps[0].id)))

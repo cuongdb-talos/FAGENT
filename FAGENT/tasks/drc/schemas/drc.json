@@ -1,6 +1,6 @@
 {
   "type": "object",
-  "description": "Final result for the current marker. Report an unresolved marker when the inferred rule condition cannot be represented by the available tools, required layers or editable polygons cannot be identified, or a tool reports unknown. Use the reason from the evidence or tool. Use only coordinates and rule limits from the supplied evidence.",
+  "description": "Report a marker unresolved only when required evidence is missing or no supported repair and local check can satisfy the rule after available options and user review are considered. State the exact missing input or unsupported condition.",
   "properties": {
     "decision": {
       "description": "Use completed after a passing local check for the current candidate. Use stop for an unresolved marker.",

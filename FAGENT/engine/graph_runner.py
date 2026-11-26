@@ -138,8 +138,6 @@ class GraphRunner:
         if state.get('identity') != self.workflow_identity():
             raise ValueError('Checkpoint workflow identity does not match the selected workflow')
         self.verify_candidate(state)
-        if history := state.get('plan_history'):
-            GraphNodes.write_plan_markdown(self.rundir, history, self.services.check_output_path)
         if candidate := state.get('candidate_path'):
             self.services.restore_candidate(candidate, state.get('validation'), state.get('candidate_digest'))
         return self.graph.invoke(

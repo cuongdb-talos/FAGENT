@@ -3,16 +3,11 @@
 # ==============================================================================
 # SECTION 1: Standard and Third-Party Library Imports
 # ==============================================================================
-from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
-from html import escape
-import inspect
 import json
 from pathlib import Path
-import re
 import sys
-import tempfile
 import traceback
 
 import jsonschema
@@ -79,11 +74,6 @@ class GraphNodes:
                 if trace_inst and node_op:
                     trace_inst.finish_operation(node_op, 'graph_node', status='completed')
                 return res
-            if step.action == 'plan':
-                res = self.execute_plan(context, step)
-                if trace_inst and node_op:
-                    trace_inst.finish_operation(node_op, 'graph_node', status='completed')
-                return res
             if step.action == 'agent':
                 res = self.execute_agent(context, step)
                 if trace_inst and node_op:
@@ -139,382 +129,11 @@ class GraphNodes:
             merged.update(updates)
         return merged
 
-    def execute_plan(self, context, step):
-        """Construct deterministic planning context and obtain model plan."""
-        state = context.state
-        messages = list(state.get('messages', []))
-        replan_count = state.get('replan_count', 0)
-        replan_ctx = state.get('replan_context')
-        if replan_ctx:
-            replan_count += 1
-            if replan_count >= self.services.max_iterations:
-                reason = f'{context.task}/{step.id}: replanning iteration limit reached'
-                print(f'[ERROR] {reason}', file=sys.stderr)
-                return {'failed': True, 'replan_count': replan_count, 'result': {'status': 'incomplete', 'reason': reason}}
-
-        checklist_data = state.get('checklist')
-        checklist_obj = Checklist.from_dict(checklist_data) if checklist_data else None
-        active_tasks = [t for t in checklist_obj.tasks if t.get('status') in ('pending', 'in_progress', 'stale')] if checklist_obj else []
-
-        if checklist_obj and len(active_tasks) == 0:
-            plan = {'summary': 'No active violations', 'steps': []}
-            history = self.version_plan(state, plan)
-            self.write_plan_artifact(history)
-            return {
-                'plan': plan,
-                'plan_history': history,
-                'replan_count': replan_count,
-                'replan_context': None,
-                'iteration': 0,
-            }
-
-        report = state.get('report')
-        if not isinstance(report, dict) and hasattr(self.services, 'drc_report'):
-            report = self.services.drc_report
-
-        next_agent = next((node for node in self.services.workflow.steps if node.id == step.next), None)
-        if next_agent is None or next_agent.action != 'agent' or not next_agent.tools:
-            raise ValueError(f'Plan target {step.next!r} must be an agent step with tools')
-        allowed_tools = {name: spec.description for name, spec in next_agent.tools.items()}
-        report = report if isinstance(report, dict) else {}
-        active_rules = list(dict.fromkeys(task['rule'] for task in active_tasks if task.get('rule')))
-        existing_refs = list(state.get('drc_context', {}).get('knowledge', {}).get('references') or [])
-        rag_refs, unavailable_evidence = self.retrieve_plan_evidence(active_rules, existing_refs)
-
-        goal = state.get('drc_context', {}).get('goal', self.services.config.get('goal', ''))
-        constraints = state.get('drc_context', {}).get('knowledge', {}).get('constraints', [])
-        instruction = getattr(step, 'prompt', None) or self.services.node_prompt(step)
-
-        plan_payload = {
-            f'{step.id}_instruction': instruction,
-            'goal': goal,
-            'constraints': constraints,
-            'report_source': report.get('source'),
-            'dbu_per_user_unit': report.get('dbu_per_user_unit'),
-            'active_tasks': self.plan_task_context(active_tasks, report),
-            'allowed_tools': allowed_tools,
-            'references': rag_refs,
-            'unavailable_evidence': unavailable_evidence,
-        }
-        if replan_ctx:
-            plan_payload['replan_context'] = replan_ctx
-            plan_payload['candidate_digest'] = state.get('candidate_digest')
-            plan_payload['candidate_path'] = state.get('candidate_path')
-            plan_payload['current_plan'] = state.get('plan')
-
-        sys_msg = next((m for m in messages if m.get('role') == 'system'), None)
-        plan_request = [sys_msg] if sys_msg else []
-        plan_request.append({'role': 'user', 'content': json.dumps(plan_payload)})
-
-        schema = deepcopy(step.schema)
-        if active_tasks:
-            steps_schema = schema['properties']['steps']
-            steps_schema['minItems'] = max(1, steps_schema.get('minItems', 0))
-            fields = steps_schema['items']['properties']
-            fields['tool']['enum'] = list(allowed_tools)
-            fields['task_id']['enum'] = [task['task_id'] for task in active_tasks]
-
-        max_retries = max(0, int(self.services.config.get('plan_validation_retries', 2)))
-        plan = None
-        message = None
-        for attempt in range(max_retries + 1):
-            message = self.services.chat(plan_request, [], response_schema=schema)
-            self.last_conversation = [*plan_request, message]
-            if message.get('tool_calls'):
-                raise ValueError('Plan step cannot invoke tools')
-
-            plan = json.loads(message['content'])
-            if active_tasks and isinstance(plan, dict) and plan.get('steps') == []:
-                reason = 'Empty plan returned while active checklist tasks remain'
-                print(f'[ERROR] {reason}', file=sys.stderr)
-                return {
-                    'failed': True,
-                    'replan_count': replan_count,
-                    'replan_context': None,
-                    'result': {'status': 'incomplete', 'reason': reason},
-                }
-
-            jsonschema.Draft202012Validator(schema).validate(plan)
-            missing_tasks, rule_mismatches = self.validate_plan_coverage(active_tasks, plan)
-            if not missing_tasks and not rule_mismatches:
-                break
-
-            issues = []
-            if missing_tasks:
-                issues.append(f'missing active tasks: {missing_tasks}')
-            if rule_mismatches:
-                issues.append(f'rule mismatches: {rule_mismatches}')
-            reason = f'Plan validation failed ({"; ".join(issues)})'
-            if attempt >= max_retries:
-                print(f'[ERROR] {reason}', file=sys.stderr)
-                return {
-                    'failed': True,
-                    'replan_count': replan_count,
-                    'replan_context': None,
-                    'result': {'status': 'incomplete', 'reason': reason},
-                }
-            plan_request = [
-                *plan_request,
-                message,
-                {
-                    'role': 'user',
-                    'content': json.dumps({
-                        'validation_error': reason,
-                        'missing_task_ids': missing_tasks,
-                        'rule_mismatches': rule_mismatches,
-                        'instruction': (
-                            f'You MUST include at least one step in "steps" for EVERY missing task_id: {missing_tasks}. '
-                            'Keep your existing valid steps and add steps for each missing task_id.'
-                        ),
-                    }),
-                },
-            ]
-
-        history = self.version_plan(state, plan)
-        self.write_plan_artifact(history)
-        return {
-            'messages': [*messages, message],
-            'plan': plan,
-            'plan_history': history,
-            'replan_count': replan_count,
-            'replan_context': None,
-            'iteration': 0,
-        }
-
-    def retrieve_plan_evidence(self, active_rules, existing_refs):
-        """Deduplicate references, retrieve missing per-rule evidence, and report unavailable rules."""
-        active_set = set(active_rules)
-        deduped = []
-        seen = set()
-        for ref in existing_refs:
-            if not isinstance(ref, dict):
-                continue
-            ref_rule = ref.get('rule')
-            if ref_rule and active_set and ref_rule not in active_set:
-                continue
-            key = (ref.get('id'), ref_rule, ref.get('source'), ref.get('line'), ref.get('content'))
-            if key not in seen:
-                seen.add(key)
-                deduped.append(ref)
-
-        covered_rules = {ref.get('rule') for ref in deduped if ref.get('rule')}
-        unavailable = []
-        rag = getattr(self.services, 'rag', None)
-        can_retrieve = rag is not None and hasattr(rag, 'retrieve')
-
-        for rule_name in active_rules:
-            if rule_name in covered_rules:
-                continue
-            if can_retrieve:
-                try:
-                    fetched = self.retrieve_for_rule(rag, rule_name)
-                except Exception as exc:
-                    print(f'[ERROR] RAG retrieval failed for rule {rule_name}: {exc}', file=sys.stderr)
-                    unavailable.append({'rule': rule_name, 'status': 'retrieval_failed', 'reason': str(exc)})
-                    continue
-                for ref in fetched or []:
-                    if not isinstance(ref, dict) or ref.get('rule') != rule_name:
-                        continue
-                    key = (ref.get('id'), ref.get('rule'), ref.get('source'), ref.get('line'), ref.get('content'))
-                    if key not in seen:
-                        seen.add(key)
-                        deduped.append(ref)
-                    covered_rules.add(rule_name)
-            if rule_name not in covered_rules:
-                unavailable.append({
-                    'rule': rule_name,
-                    'status': 'unavailable',
-                    'reason': 'No exact rule reference found in RAG',
-                })
-
-        return deduped, unavailable
-
-    def retrieve_for_rule(self, rag, rule_name):
-        """Invoke configured RAG retriever with signature-appropriate arguments."""
-        limit = max(1, int(self.services.config.get('rag_limit', 5)))
-        params = inspect.signature(rag.retrieve).parameters.values()
-        positional = [
-            p for p in params
-            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-        ]
-        has_varargs = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
-        if has_varargs or len(positional) >= 3:
-            return rag.retrieve(rule_name, [rule_name], limit)
-        return rag.retrieve(rule_name)
-
-    @staticmethod
-    def validate_plan_coverage(active_tasks, plan):
-        """Verify every active task is covered and structured step rules match their task."""
-        active_ids = [task['task_id'] for task in active_tasks]
-        task_rules = {task['task_id']: task.get('rule') for task in active_tasks}
-        steps = plan.get('steps', []) if isinstance(plan, dict) else []
-        planned_ids = {step.get('task_id') for step in steps if isinstance(step, dict)}
-        missing_tasks = [task_id for task_id in active_ids if task_id not in planned_ids]
-        rule_mismatches = [
-            {'task_id': step.get('task_id'), 'expected_rule': task_rules.get(step.get('task_id')), 'step_rule': step.get('rule')}
-            for step in steps
-            if isinstance(step, dict) and 'rule' in step and step.get('rule') != task_rules.get(step.get('task_id'))
-        ]
-        return missing_tasks, rule_mismatches
-
-    @staticmethod
-    def version_plan(state, plan):
-        """Build a new active version while preserving earlier step outcomes."""
-        history = [
-            {**version, 'status': 'superseded'} if version['status'] == 'active' else version
-            for version in state.get('plan_history', [])
-        ]
-        history.append({
-            'version': len(history) + 1,
-            'summary': plan['summary'],
-            'status': 'active',
-            'steps': [
-                {**step, 'step_id': index, 'status': 'pending', 'call_id': None, 'outcome': None}
-                for index, step in enumerate(plan['steps'], 1)
-            ],
-        })
-        return history
-
-    @staticmethod
-    def active_plan(history):
-        """Return the current version from chronological history."""
-        return history[-1] if history and history[-1]['status'] == 'active' else None
-
-    @staticmethod
-    def record_plan_call(active_plan, name, arguments, call_id, result, error):
-        """Record execution or explicit conditional skip on the first eligible step of the active plan."""
-        if active_plan is None:
-            return
-        if error is None and isinstance(result, dict) and result.get('status') == 'skipped' and result.get('skipped_tool'):
-            target_tool = result['skipped_tool']
-            target_task = result.get('skipped_task_id')
-            for planned in active_plan['steps']:
-                if planned['status'] != 'pending' or planned['tool'] != target_tool:
-                    continue
-                if target_task is not None and planned['task_id'] != target_task:
-                    continue
-                planned.update(
-                    status='skipped',
-                    call_id=call_id,
-                    outcome={'status': 'skipped', 'reason': str(result.get('reason') or '')},
-                )
-                return
-            return
-
-        for planned in active_plan['steps']:
-            if planned['status'] != 'pending' or planned['tool'] != name:
-                continue
-            if isinstance(arguments, dict) and 'task_id' in arguments and planned['task_id'] != arguments['task_id']:
-                continue
-            if error is None:
-                outcome = {}
-                if isinstance(result, dict):
-                    outcome = {key: result[key] for key in ('status', 'reason', 'supported', 'found') if key in result}
-                    if 'proposals' in result and isinstance(result['proposals'], list):
-                        outcome['proposal_count'] = len(result['proposals'])
-                planned.update(status='done', call_id=call_id, outcome=outcome or {'summary': 'completed'})
-            else:
-                planned.update(status='failed', call_id=call_id, outcome={'error': error})
-            break
-
-    def write_plan_artifact(self, history):
-        """Render plan history in the workflow run directory."""
-        self.write_plan_markdown(self.services.rundir, history, getattr(self.services, 'check_output_path', None))
-
     def write_checklist_artifact(self, checklist):
         path = Path(self.services.rundir) / 'checklist.json'
         self.services.check_output_path(path)
         Checklist.from_dict(checklist).save(path)
         return str(path)
-
-    @staticmethod
-    def markdown_text(value):
-        """Render dynamic values inline without allowing Markdown or HTML markup."""
-        if not isinstance(value, str):
-            value = json.dumps(value, ensure_ascii=False)
-        inline = ' '.join(value.splitlines())
-        return escape(re.sub(r'([\\`*\[\]])', r'\\\1', inline), quote=False)
-
-    @classmethod
-    def write_plan_markdown(cls, rundir, plan_history, check_output_path):
-        """Atomically render all plan versions as a derived artifact."""
-        target = Path(rundir) / 'plan.md'
-        if check_output_path:
-            check_output_path(target)
-        marks = {'pending': ' ', 'done': 'x', 'failed': '!', 'skipped': '-'}
-        lines = ['# DRC plan']
-        for version in plan_history:
-            lines.extend([
-                '',
-                f"## Plan {version['version']} ({version['status']})",
-                '',
-                f"Summary: {cls.markdown_text(version['summary'])}",
-                '',
-            ])
-            for step in version['steps']:
-                marker = marks[step['status']]
-                tool = cls.markdown_text(step['tool'])
-                purpose = cls.markdown_text(step['purpose'])
-                task_id = cls.markdown_text(step['task_id'])
-                label = f'task: {task_id}'
-                if step['call_id'] is not None:
-                    label += f"; call: {cls.markdown_text(step['call_id'])}"
-                lines.append(f"{step['step_id']}. [{marker}] **{tool}** — {purpose} ({label})")
-                outcome = step['outcome']
-                if step['status'] == 'failed':
-                    lines.append(f"   - Error: {cls.markdown_text(outcome['error'])}")
-                elif step['status'] == 'skipped':
-                    lines.append(f"   - Skipped: {cls.markdown_text(outcome.get('reason', ''))}")
-                elif step['status'] == 'done':
-                    details = '; '.join(f'{key}={cls.markdown_text(value)}' for key, value in outcome.items())
-                    if outcome == {'summary': 'completed'}:
-                        details = 'completed'
-                    lines.append(f'   - Outcome: {details}')
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=target.parent, delete=False) as handle:
-                temporary = Path(handle.name)
-                handle.write('\n'.join(lines) + '\n')
-            temporary.replace(target)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-        return target
-
-    @staticmethod
-    def plan_task_context(tasks, report):
-        markers = defaultdict(list)
-        for rule in report.get('rules') or []:
-            occurrences = defaultdict(int)
-            name = str(rule.get('name', '')).strip()
-            for marker in rule.get('geometry') or []:
-                violation_id = marker.get('id')
-                occurrence = occurrences[violation_id]
-                occurrences[violation_id] += 1
-                markers[name, violation_id, occurrence].append(marker)
-
-        task_context = []
-        for task in tasks:
-            key = (task['rule'], task['violation_id'], task.get('occurrence', 0))
-            matches = markers.get(key, [])
-            marker = matches[0] if len(matches) == 1 else {}
-            points = marker.get('points_dbu')
-            geometry_status = 'ambiguous' if len(matches) > 1 else 'matched' if points else 'missing'
-            item = {
-                'task_id': task['task_id'],
-                'rule': key[0],
-                'violation_id': key[1],
-                'occurrence': key[2],
-                'status': task['status'],
-                'type': marker.get('type'),
-                'points_dbu': points,
-                'geometry_status': geometry_status,
-            }
-            if task.get('reason'):
-                item['reason'] = task['reason']
-            task_context.append(item)
-        return task_context
 
     def advance_queue_item(self, state, status: str, reason: str, response=None, message_count: int | None = None) -> dict:
         """Record terminal item outcome, pop current_task_id once, reset iteration, and advance."""
@@ -594,7 +213,7 @@ class GraphNodes:
             response_schema = getattr(step, 'schema', None)
             requires_check = queue_mode and context.task == 'drc' and any(
                 f'fix_{kind}' in step.tools and f'check_{kind}' in step.tools
-                for kind in ('area', 'cover')
+                for kind in ('area', 'cover', 'width')
             )
             verified_pass = False
             if requires_check:
@@ -684,6 +303,9 @@ class GraphNodes:
         """Expose operations for the current proposal, apply, or verification stage."""
         task_id = state['current_task_id']
         response_schema = deepcopy(response_schema)
+        review_context = ((state.get('review') or {}).get('context') or {})
+        review_repair = (state.get('review') or {}).get('decision') == 'continue' and review_context.get('task_id') == task_id
+        verified_pass = verified_pass and not review_repair
         response_schema['properties']['decision']['enum'] = ['completed'] if verified_pass else ['stop']
         response_schema['properties']['status']['enum'] = ['verified'] if verified_pass else ['incomplete']
         if verified_pass:
@@ -704,24 +326,26 @@ class GraphNodes:
             candidate_digest = self.services.candidate_digest(Path(self.services.layout.gds_path))
         proposal_ids = {}
         for proposal_id, proposal in proposals.items():
-            if (candidate_digest and proposal.get('task_id') == task_id
+            if (not review_repair and candidate_digest and proposal.get('task_id') == task_id
                     and proposal.get('candidate_digest') == candidate_digest):
                 proposal_ids.setdefault(proposal['kind'], []).append(proposal_id)
 
         repairs = []
         propose_fields = {
-            'area': ('polygon_id', 'minimum_area'),
-            'cover': ('inner_id', 'groups', 'minimum_enclosure'),
+            'area': (('polygon_id',), ('minimum_area', 'cover_context')),
+            'cover': (('inner_id', 'groups', 'minimum_enclosure'), ()),
+            'width': (('polygon_id', 'minimum_width'), ('preserve_cover', 'cover_context', 'resize_mode')),
         }
-        for kind, fields in propose_fields.items():
+        for kind, (required_fields, optional_fields) in propose_fields.items():
             spec = specs.get(f'fix_{kind}')
             if spec is None or (proposal_ids and kind not in proposal_ids):
                 continue
             applying = kind in proposal_ids
             parameters = spec['function']['parameters']
             properties = parameters['properties']
-            required = ['task_id', 'action', *(['proposal_id'] if applying else fields)]
-            parameters['properties'] = {key: properties[key] for key in required}
+            required = ['task_id', 'action', *(['proposal_id'] if applying else required_fields)]
+            allowed = required if applying else ['task_id', 'action', *required_fields, *optional_fields]
+            parameters['properties'] = {key: properties[key] for key in allowed if key in properties}
             parameters['required'] = required
             properties['task_id']['const'] = task_id
             properties['action']['enum'] = ['apply'] if applying else ['propose']
@@ -752,7 +376,7 @@ class GraphNodes:
             if not isinstance(request['system'], str) or not isinstance(request['user'], dict):
                 raise ValueError('Request builder must return system text and a user object')
             payload = request['user']
-            history = self._select_task_messages(messages, state.get('task_message_start', 0))
+            history = self._select_task_messages(messages, state.get('task_message_start', 0), state.get('current_task_id'))
             return [
                 {'role': 'system', 'content': request['system']},
                 {'role': 'user', 'content': json.dumps(payload, allow_nan=False)},
@@ -773,7 +397,7 @@ class GraphNodes:
             agent_payload['current_task_id'] = state['current_task_id']
             agent_payload['active_task'] = self.build_active_task_context(state, state['current_task_id'])
             agent_payload['task_history'] = list(state.get('task_history') or [])
-            request_messages = self._select_task_messages(messages, state.get('task_message_start', 0))
+            request_messages = self._select_task_messages(messages, state.get('task_message_start', 0), state.get('current_task_id'))
         else:
             if state.get('checklist') is not None:
                 agent_payload['current_checklist'] = state['checklist']
@@ -784,11 +408,6 @@ class GraphNodes:
                 agent_payload['task_history'] = list(state.get('task_history') or [])
             request_messages = list(messages)
 
-        if state.get('plan') is not None:
-            agent_payload['plan'] = state['plan']
-        active_plan = self.active_plan(state.get('plan_history', []))
-        if active_plan is not None:
-            agent_payload['plan_progress'] = active_plan
         report = state.get('report') or {}
         target_cell = report.get('top_cell') if task_name == 'drc' else None
         if target_cell:
@@ -800,11 +419,21 @@ class GraphNodes:
             })
         return request_messages, agent_payload
 
-    def _select_task_messages(self, messages: list[dict], task_message_start: int) -> list[dict]:
+    def _select_task_messages(self, messages: list[dict], task_message_start: int, task_id: str | None = None) -> list[dict]:
         """Keep shared system instructions and paired assistant/tool messages for the current item."""
         system_msgs = [m for m in messages if m.get('role') == 'system']
         start_idx = max(0, int(task_message_start or 0))
         item_msgs = [m for m in messages[start_idx:] if m.get('role') != 'system']
+        for message in messages:
+            if message.get('role') != 'user' or message in item_msgs:
+                continue
+            try:
+                content = json.loads(message.get('content', ''))
+            except (TypeError, ValueError):
+                continue
+            if (isinstance(content, dict) and 'user_review' in content
+                    and (task_id is None or content.get('task_id') == task_id)):
+                item_msgs.insert(0, message)
 
         available_tool_ids = {
             m.get('tool_call_id')
@@ -1028,8 +657,6 @@ class GraphNodes:
         if any(not isinstance(item, str) or not item for item in ids) or len(ids) != len(set(ids)):
             raise ValueError('Missing or duplicate tool call ID')
         updates = {}
-        history = deepcopy(context.state.get('plan_history', []))
-        active_plan = self.active_plan(history)
         trace_inst = getattr(self.services, 'conversation_trace', None)
         for call, call_id in zip(calls, ids):
             name = arguments = result_payload = error = None
@@ -1066,7 +693,6 @@ class GraphNodes:
                 if invalid_reason:
                     error = f'{context.task}/{step.id}/{name}: invalid result: {invalid_reason}'
                     if context.state.get('task_queue') is not None and context.state.get('current_task_id') is not None:
-                        self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
                         messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
                         self.last_conversation = list(messages)
                         adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error, message_count=len(messages))
@@ -1088,13 +714,11 @@ class GraphNodes:
                 if trace_inst and tool_op:
                     trace_inst.finish_operation(tool_op, 'tool_call', status='failed', error=exc, outputs={'error': error})
                 if context.state.get('task_queue') is not None and context.state.get('current_task_id') is not None:
-                    self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
                     messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
                     self.last_conversation = list(messages)
                     adv = self.advance_queue_item({**context.state, **updates}, 'unresolved', error, message_count=len(messages))
                     return {**updates, **adv, 'messages': messages}
                 call_args = arguments if isinstance(arguments, dict) else {}
-                relevant_vids = [call_args['task_id']] if 'task_id' in call_args else []
                 updates['tool_review'] = {
                     'tool': tool_name,
                     'tool_call_id': call_id,
@@ -1103,19 +727,6 @@ class GraphNodes:
                     'error': error,
                     'candidate_digest': context.state.get('candidate_digest'),
                 }
-                updates['replan_context'] = None
-                """updates['replan_context'] = {
-                    'failed_tool': tool_name,
-                    'tool_call_id': call_id,
-                    'arguments': call_args,
-                    'error': error,
-                    'conversation': [
-                        messages[-1],
-                        {'role': 'tool', 'tool_call_id': call_id, 'content': payload},
-                    ],
-                    'relevant_violations': relevant_vids,
-                }"""
-            self.record_plan_call(active_plan, name, arguments, call_id, result_payload, error)
             messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': payload})
             if trace_inst:
                 trace_inst.append({
@@ -1127,15 +738,6 @@ class GraphNodes:
                 if trace_inst:
                     trace_inst.append({'type': 'tool_review_requested', **updates['tool_review']})
                 break
-        if history:
-            updates['plan_history'] = history
-            try:
-                self.write_plan_artifact(history)
-            except (OSError, ValueError) as exc:
-                # Dispatched tools may already have persisted changes.
-                reason = f'{context.task}/{step.id}: cannot write plan.md: {exc}'
-                print(f'[ERROR] {reason}', file=sys.stderr)
-                updates.update(failed=True, result={'status': 'incomplete', 'reason': reason})
         if updates.get('checklist'):
             try:
                 updates['checklist_path'] = self.write_checklist_artifact(updates['checklist'])
@@ -1189,15 +791,13 @@ class GraphNodes:
         return self.trace_route(self.node_name(step.id), step.id, state, destination)
 
     def route_task_tools(self, state, step):
-        """Return to caller or route to plan on tool failure."""
+        """Return to caller or surface a tool error for human review."""
         if state.get('failed'):
             destination = 'END'
         elif state.get('tool_review'):
             destination = f'{step.id}--tool-review'
         elif getattr(step, 'router', None):
             destination = self.configured_destination(state, step)
-        elif state.get('replan_context'):
-            destination = self.node_name('plan')
         elif state.get('task_queue') is not None and state.get('current_task_id') is None:
             destination = self.node_name(step.next)
         else:
@@ -1210,10 +810,6 @@ class GraphNodes:
             return 'tool result must be an object'
         if result.get('status') in {'unknown', 'unsupported', 'ambiguous', 'error', 'failed'}:
             return result.get('reason') or f"status={result['status']}"
-        if name == 'measure_violation' and result.get('status') != 'measured':
-            return f"unexpected measurement status {result.get('status')!r}"
-        if name == 'propose_polygon_fix' and not result.get('proposals') and result.get('reason'):
-            return result['reason']
         return None
 
     def review_tool(self, state):
@@ -1297,19 +893,47 @@ class GraphNodes:
                 'human_review',
                 {'candidate': state.get('candidate_path'), 'validation': validation},
             )
-        feedback = interrupt({'result': result, 'validation': validation, 'checklist': state.get('checklist')})
-        envelope = feedback if isinstance(feedback, dict) else {'feedback': feedback}
-        feedback = envelope.get('feedback')
+        raw_feedback = interrupt({'result': result, 'validation': validation, 'checklist': state.get('checklist')})
+        envelope = raw_feedback if isinstance(raw_feedback, dict) else {'feedback': raw_feedback}
+        feedback = next((envelope.get(key) for key in ('feedback', 'review', 'text')
+                         if isinstance(envelope.get(key), str)), None)
         messages = list(state.get('messages', []))
-        decision = 'stop'
-        if isinstance(feedback, str) and feedback.strip():
-            messages.append({'role': 'user', 'content': feedback})
+        explicit_stop = isinstance(envelope, dict) and (envelope.get('decision') == 'stop' or envelope.get('action') == 'stop')
+        decision = 'stop' if explicit_stop or not isinstance(feedback, str) or not feedback.strip() else 'continue'
+        if decision == 'continue':
             try:
-                decision = self.services.interpret_feedback(feedback, state)['decision']
-                if decision not in ('stop', 'continue', 'unclear'):
-                    decision = 'unclear'
+                interpret = getattr(self.services, 'interpret_feedback', None)
+                interpreted = interpret(feedback, state) if callable(interpret) else None
+                if ((isinstance(interpreted, dict) and interpreted.get('decision') == 'stop')
+                        or (isinstance(interpreted, str) and interpreted.strip().lower() == 'stop')):
+                    decision = 'stop'
             except (ValueError, RuntimeError, KeyError, TypeError, OSError, ImportError):
-                decision = 'unclear'
+                pass
+        task_id = state.get('current_task_id')
+        if not task_id:
+            history = state.get('task_history') or []
+            task_id = next((item.get('task_id') for item in reversed(history) if item.get('task_id')), None)
+        if decision == 'continue':
+            active_task = self.build_active_task_context(state, task_id) if task_id else None
+            if active_task:
+                active_task.setdefault(
+                    'layer_map', active_task.get('drc', {}).get('rule_evidence', {}).get('layer_mapping') or {},
+                )
+            last_tool = self._last_tool_context(state)
+            review_context = {
+                'task_id': task_id,
+                'user_review': feedback.strip(),
+                'last_tool': last_tool,
+                'candidate_path': state.get('candidate_path'),
+                'candidate_digest': state.get('candidate_digest'),
+                'task_checks': state.get('task_checks') or {},
+                'active_task': active_task,
+            }
+            message_start = len(messages)
+            messages.append({'role': 'user', 'content': json.dumps(review_context, allow_nan=False)})
+        else:
+            review_context = None
+            message_start = state.get('task_message_start', 0)
         authorized = (
             decision == 'stop'
             and isinstance(feedback, str)
@@ -1319,6 +943,7 @@ class GraphNodes:
         )
         review = {
             'feedback': feedback,
+            'context': review_context,
             'decision': decision,
             'authorized': authorized,
             'storage_consent': authorized,
@@ -1333,8 +958,52 @@ class GraphNodes:
             )
         update = {'result': result, 'messages': messages, 'review': review, 'save_requested': authorized}
         if decision == 'continue':
-            update.update(iteration=0, repair_error=None, response=None)
+            queue = list(state.get('task_queue') or [])
+            current_task_id = state.get('current_task_id')
+            current_task_id = current_task_id or task_id
+            if current_task_id and current_task_id not in queue:
+                queue.insert(0, current_task_id)
+            update.update(
+                current_task_id=current_task_id,
+                task_queue=queue,
+                task_message_start=message_start,
+                iteration=0,
+                repair_error=None,
+                response=None,
+                pending_tools=False,
+                failed=False,
+            )
         return update
 
-
-write_plan_markdown = GraphNodes.write_plan_markdown
+    def _last_tool_context(self, state):
+        """Return the latest tool call with parsed arguments and result or error."""
+        tool_review = state.get('tool_review')
+        if tool_review:
+            return {
+                'name': tool_review.get('tool'), 'arguments': tool_review.get('arguments'),
+                'result': tool_review.get('result'), 'error': tool_review.get('error'),
+            }
+        messages = state.get('messages') or []
+        for tool_message in reversed(messages):
+            if tool_message.get('role') != 'tool' or not tool_message.get('tool_call_id'):
+                continue
+            call_id = tool_message['tool_call_id']
+            assistant = next((message for message in reversed(messages)
+                              if message.get('role') == 'assistant'
+                              and any(call.get('id') == call_id for call in message.get('tool_calls') or [])), None)
+            if not assistant:
+                continue
+            call = next(call for call in assistant.get('tool_calls') or [] if call.get('id') == call_id)
+            arguments = call.get('function', {}).get('arguments')
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                outcome = json.loads(tool_message.get('content', '{}'))
+            except (TypeError, ValueError):
+                outcome = tool_message.get('content')
+            return {'name': call.get('function', {}).get('name'), 'arguments': arguments, 'result': outcome,
+                    'error': outcome.get('error') if isinstance(outcome, dict) else None}
+        return None

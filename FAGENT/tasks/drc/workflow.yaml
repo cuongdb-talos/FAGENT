@@ -30,8 +30,10 @@ nodes:
   tools:
   - tools:fix_cover
   - tools:fix_area
+  - tools:fix_width
   - tools:check_cover
   - tools:check_area
+  - tools:check_width
 - id: verify
   action: steps:verify_current_task
   next: repair
@@ -49,7 +51,7 @@ nodes:
   router: steps:human_review_route
   routes:
     stop: END
-    continue: resume_repair
+    continue: repair
     unclear: human_review
 - id: resume_repair
   action: steps:resume_repair

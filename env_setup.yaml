@@ -7,5 +7,5 @@ tasks :
       gds_folder : "DRC"
       drc_files : "DRC/1P7M_6Ic_1TKMc_ALPA2.drc"
       prompt : "Fix only DRC error about CT_R_11 rule."
-      skip_prompt : "bỏ qua lỗi density"
+      skip_prompt : "Ignore density error"
       skip_distance_threshold : 0.5

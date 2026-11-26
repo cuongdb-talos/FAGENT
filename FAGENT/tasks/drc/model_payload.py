@@ -58,7 +58,10 @@ def build_request(state: dict, node_prompt: str, services, focused: dict | None)
     unit = getattr(library, 'unit', None)
     precision = getattr(library, 'precision', None)
     review = state.get('review') or {}
-    review_input = {'review_feedback': review['feedback']} if review.get('decision') == 'continue' else {}
+    review_context = review.get('context') or {}
+    review_input = ({'review_feedback': review['feedback'], 'review_context': review_context}
+                    if review.get('decision') == 'continue'
+                    and review_context.get('task_id') == state.get('current_task_id') else {})
     return {
         'system': '\n\n'.join(part for part in (node_prompt, policy) if part),
         'user': {

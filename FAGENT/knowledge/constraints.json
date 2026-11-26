@@ -1,3 +1,3 @@
 [
-  "Minimize width where possible while respecting DRC rules and design intent."
+  "Do not reduce a polygon below the minimum width required by the active DRC rule or user review. Minimize unnecessary expansion while preserving all active DRC rules and cover conditions."
 ]

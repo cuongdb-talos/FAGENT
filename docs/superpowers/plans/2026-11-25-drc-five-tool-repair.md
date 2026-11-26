@@ -19,7 +19,7 @@
 - Area and enclosure constraints derive from rule evidence; coordinates use GDS user units, area uses squared user units, precision comes from the GDS grid.
 - Preserve previously verified edits; rollback the current task on failed check. Unsupported or ambiguous tasks become unresolved and leave the queue; attempts are bounded by configuration.
 - Save once after queue completion, including when unresolved tasks remain. Report local geometry verification separately from full DRC validation.
-- Expose only five model tools; remove obsolete DRC tool registrations and handlers after checking references, preserving shared internals still in use.
+- Expose six model tools: cover, area, and width repairs plus their checks. Keep `save_gds` as an internal workflow step.
 
 ## Review Focus
 
@@ -32,7 +32,7 @@
 ## File Structure and Data Flow
 
 - Modify `FAGENT/capabilities/layout/repair_proposals.py` and `cover_check.py`: deterministic proposal generation and geometry checks.
-- Modify `FAGENT/tasks/drc/tools.py`: register the five model tools and expose typed interfaces.
+- Modify `FAGENT/tasks/drc/tools.py`: register the repair and check tools and expose typed interfaces.
 - Modify `FAGENT/tasks/drc/steps.py`, `FAGENT/engine/graph_nodes.py`, `FAGENT/engine/graph_runner.py`, and `FAGENT/engine/fagent_state.py` as needed: task lifecycle, transactions, queue, save routing.
 - Modify `FAGENT/tasks/drc/prompts/repair.md` and `FAGENT/tasks/drc/workflow.yaml`: consistent instructions and tool availability.
 - Tests: `tests/test_drc_five_tool_geometry.py`, `tests/test_drc_five_tool_transactions.py`, `tests/test_drc_five_tool_flow.py`.
@@ -41,11 +41,11 @@
 
 ## Interfaces and Examples
 
-`fix_cover(task_id: str, action: str, inner_id: str | None = None, groups: list[list[str]] | None = None, proposal_id: str | None = None) -> ToolResult` and `fix_area(task_id: str, action: str, polygon_id: str | None = None, minimum_area: float | None = None, proposal_id: str | None = None) -> ToolResult`: `action` is `propose` or `apply`; proposals contain ID, candidate digest, affected IDs, before/after points, rule assumptions and local check. Apply uses only a staged ID for the current task and candidate digest.
+`fix_cover(task_id: str, action: str, inner_id: str | None = None, groups: list[list[str]] | None = None, proposal_id: str | None = None) -> ToolResult` and `fix_area(task_id: str, action: str, polygon_id: str | None = None, minimum_area: float | None = None, proposal_id: str | None = None, cover_context: dict | None = None) -> ToolResult`: `action` is `propose` or `apply`; proposals contain ID, candidate digest, affected IDs, before/after points, rule assumptions and local check. `cover_context` contracts an oversized covering polygon while retaining enclosure of `protected_inner_ids`; `minimum_enclosure` defaults to 0. Apply uses only a staged ID for the current task and candidate digest.
 
 `check_cover(task_id: str) -> ToolResult` and `check_area(task_id: str) -> ToolResult` check the staged transaction against its bound inputs and return `pass`, `fail`, or `unknown`, measurements and candidate digest. `save_gds() -> ToolResult` returns output path, digest, and task summary; only available after queue completion.
 
-Example: `groups=[["M1:1", "M1:2"], ["AA:1"]]` means `(M1:1 union M1:2) covers CT AND AA:1 covers CT`. For `GT_A_13`, `minimum_area=0.038` square user units; a rectangular `0.4 × 0.06` polygon has area `0.024` and must not pass unchanged. Proposal output example: `{"proposal_id":"p1","candidate_digest":"...","changes":[{"polygon_id":"GT:1","after_points_user":[...]}]}`. A successful local check returns `{"status":"pass","deck_clean":false}`.
+Example: `groups=[["M1:1", "M1:2"], ["AA:1"]]` means `(M1:1 union M1:2) covers CT AND AA:1 covers CT`. For a bloated `M1:1` after `fix_cover`, call `fix_area(..., polygon_id="M1:1", cover_context={"protected_inner_ids":["CT:1"],"minimum_enclosure":0.02})`; contraction is supported for axis-aligned rectangles and is rejected if its snapped bounds cannot fit inside the current polygon. For `GT_A_13`, `minimum_area=0.038` square user units; a rectangular `0.4 × 0.06` polygon has area `0.024` and must not pass unchanged. Proposal output example: `{"proposal_id":"p1","candidate_digest":"...","changes":[{"polygon_id":"GT:1","after_points_user":[...]}]}`. A successful local check returns `{"status":"pass","deck_clean":false}`.
 
 ### Task 1: Geometry proposals and checks
 

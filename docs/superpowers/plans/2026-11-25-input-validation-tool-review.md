@@ -83,7 +83,7 @@ grep -n -A 4 '^GT_A_13[[:space:]]*{' DRC/1P7M_6Ic_1TKMc_ALPA2.drc
 - [ ] Run `pytest -q tests/test_drc_review_followup.py tests/test_drc_replanning.py`; confirm new tests fail before implementation.
 - [ ] Route classified tool outcomes to a dedicated interrupt after tool execution has been checkpointed. Resume through the existing graph runner/checkpointer, validate feedback, retain original trace and append review/resume events. Do not turn all empty arrays into failures; classify documented unsupported/unknown proposal results explicitly.
 - [ ] Align checklist tool schema and repair prompt: optional `work`, nonempty when provided; supply a clear error for invalid input. Preserve tool results and tool-call IDs across interrupt/resume.
-- [ ] Run `pytest -q tests/test_drc_review_followup.py tests/test_drc_replanning.py tests/test_drc_report_checklist.py tests/test_drc_plan_progress.py`; require all tests to pass.
+- [ ] Run `pytest -q tests/test_drc_review_followup.py tests/test_drc_replanning.py tests/test_drc_report_checklist.py`; require all tests to pass.
 
 ## Task 5: End-to-end boundary and artifact verification
 

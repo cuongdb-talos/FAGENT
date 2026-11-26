@@ -107,7 +107,7 @@ class WorkflowLoader:
             bindings = step.get('tools', []) if action == 'agent' else []
             if isinstance(action, list):
                 bindings = list(action)
-            elif action not in {'agent', 'plan', 'review'}:
+            elif action not in {'agent', 'review'}:
                 bindings = [action]
             if 'router' in step:
                 bindings = [*bindings, step['router']]
@@ -175,8 +175,6 @@ class WorkflowLoader:
                     step_prompt = self._read_local(directory, step['prompt'], sources).decode()
                 elif (directory / 'prompts' / f'{step["id"]}.md').is_file():
                     step_prompt = self._read_local(directory, f'prompts/{step["id"]}.md', sources).decode()
-                if step['action'] == 'plan' and (step_schema is None or not step_prompt):
-                    raise ValueError('Plan step requires step-local prompt and schema')
                 if isinstance(step['action'], list):
                     bound_actions = []
                     for reference in step['action']:
@@ -184,7 +182,7 @@ class WorkflowLoader:
                         self._check_signature(bound)
                         bound_actions.append(bound)
                     functions = tuple(bound_actions)
-                elif step['action'] not in {'agent', 'plan', 'review'}:
+                elif step['action'] not in {'agent', 'review'}:
                     function = self._bind(directory, step['action'], references, sources, modules)
                     self._check_signature(function)
                     functions = (function,)
