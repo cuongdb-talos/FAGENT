@@ -47,7 +47,7 @@ class Steps:
         report = context.services.drc_report
         checklist = Checklist()
         violations = checklist.rule_summary(report)
-        selected_rules = self._select_checklist_rules(context.services, violations)
+        selected_rules = self._select_checklist_rules(context.services, violations, goal)
         checklist.run(report=report, selected_rules=selected_rules)
         snapshot = checklist.read()
         task_queue = checklist.queue_ids()
@@ -65,16 +65,18 @@ class Steps:
         checklist.save(Path(result['checklist_path']))
         return result
 
-    def _select_checklist_rules(self, services, violations):
-        """Exclude violations close to the explicit skip query in embedding space."""
+    def _select_checklist_rules(self, services, violations, goal=''):
+        """Select violations close to the user goal and exclude matches to skip_prompt."""
         selected = {entry['rule'] for entry in violations}
-        query = services.config.get('skip_prompt', '')
+        skip_prompt = services.config.get('skip_prompt', '')
         threshold = services.config.get('skip_distance_threshold', 0.5)
-        if not isinstance(query, str):
+        if not isinstance(goal, str):
+            raise ValueError('goal must be a string')
+        if not isinstance(skip_prompt, str):
             raise ValueError('skip_prompt must be a string')
         if type(threshold) not in (float, int) or not 0 <= threshold <= 2:
             raise ValueError('skip_distance_threshold must be between 0 and 2')
-        if not selected or not query.strip():
+        if not selected or (not goal.strip() and not skip_prompt.strip()):
             return selected
 
         texts = []
@@ -82,25 +84,45 @@ class Steps:
             description = entry['description']
             if isinstance(description, list):
                 description = '\n'.join(description)
-            texts.append((description or '').strip() or entry['rule'])
+            texts.append(f"{entry['rule']}\n{(description or '').strip()}".strip())
 
-        query_vector, *rule_vectors = services.embed_texts([query.strip(), *texts])
-        query_norm = math.hypot(*query_vector)
-        if not query_norm or len(rule_vectors) != len(violations):
+        queries = [query.strip() for query in (goal, skip_prompt) if query.strip()]
+        vectors = services.embed_texts([*queries, *texts])
+        query_vectors = vectors[:len(queries)]
+        rule_vectors = vectors[len(queries):]
+        if len(rule_vectors) != len(violations):
             raise ValueError('Invalid checklist embedding response')
+        query_norms = [math.hypot(*vector) for vector in query_vectors]
+        if any(not norm for norm in query_norms):
+            raise ValueError('Invalid checklist query embedding response')
         distances = {}
         for entry, vector in zip(violations, rule_vectors, strict=True):
             norm = math.hypot(*vector)
-            if not norm or len(vector) != len(query_vector):
+            if not norm or any(len(vector) != len(query_vector) for query_vector in query_vectors):
                 raise ValueError(f"Invalid embedding for rule {entry['rule']}")
-            cosine = sum((x / query_norm) * (y / norm) for x, y in zip(query_vector, vector, strict=True))
-            distances[entry['rule']] = 1 - max(-1.0, min(1.0, cosine))
-        selected = {rule for rule, distance in distances.items() if distance >= threshold}
+            distances[entry['rule']] = {}
+            for query, query_vector, query_norm in zip(queries, query_vectors, query_norms, strict=True):
+                cosine = sum((x / query_norm) * (y / norm) for x, y in zip(query_vector, vector, strict=True))
+                distances[entry['rule']][query] = 1 - max(-1.0, min(1.0, cosine))
+
+        if goal.strip():
+            selected = {
+                rule for rule, rule_distances in distances.items()
+                if rule_distances[goal.strip()] <= threshold
+            }
+        if skip_prompt.strip():
+            selected = {
+                rule for rule in selected
+                if distances[rule][skip_prompt.strip()] >= threshold
+            }
         trace = getattr(services, 'conversation_trace', None)
         if trace:
-            op = trace.start_operation('checklist_embedding_filter', {'query': query, 'threshold': threshold})
+            op = trace.start_operation('checklist_embedding_filter', {
+                'goal': goal, 'skip_prompt': skip_prompt, 'threshold': threshold,
+            })
             trace.finish_operation(op, 'checklist_embedding_filter', status='completed',
-                                   outputs={'distances': distances, 'excluded_rules': sorted(distances.keys() - selected)})
+                                   outputs={'distances': distances, 'selected_rules': sorted(selected),
+                                            'excluded_rules': sorted(distances.keys() - selected)})
         return selected
 
     def read_gds(self, context):
